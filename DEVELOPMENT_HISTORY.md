@@ -41,13 +41,6 @@
 - **任務排程**：使用 **Super Loop** 搭配 `millis()` 進行非阻塞定時。
 - **LCD 驅動**：因位址為 `0x27`，推斷需實作 PCF8574 I2C 轉接板邏輯。
 
-### 專案狀態
-- [x] 環境初始化完成。
-- [x] 確定開發策略。
-- [ ] 待實作 I2C Bus Driver (Start/Stop/Write/Read)。
-- [ ] 待實作 1-Wire Bus Driver (DHT22)。
-- [ ] 待實作 LCD2004 驅動與 RTC 讀取。
-
 ---
 
 ## 2026-05-18: 程式架構與資料結構設計
@@ -76,9 +69,26 @@
 - **RTC 結構**: `struct RtcTime { uint8_t year, month, day, hour, min, sec; bool ok; };`
 - **DHT 結構**: `struct DhtData { float temp; float humd; bool ok; };`
 
-### 專案狀態
-- [x] 完成軟體架構與資料結構規劃。
-- [ ] 待實作 I2C Bus Layer 與 DS1307 讀取。
-*LCD2004 I2C 位址 (0x27)**：雖然使用者提及電路圖未見轉接板，但 0x27 是典型的 PCF8574 轉接板位址。實作時將針對 PCF8574 + HD44780 組合進行驅動開發。
-- **STM32 Hardware I2C**：將直接配置 STM32F103 的暫存器（CR1, CR2, OAR1, DR, SR1, SR2）來實現 I2C 通訊。
+---
 
+## 2026-05-18: 實作 I2C Bus Layer 與資料結構
+
+### 使用者需求 (Prompt)
+- 可以（開始實作）。
+
+### 關鍵決策
+- **I2C 核心實作**：採用 Polling 方式操作 I2C 暫存器。實作了 `i2c_start`, `i2c_stop`, `i2c_write`, `i2c_read` 及 `i2c_send_addr`。
+- **錯誤處理**：在等待 Flag 時加入簡易的 timeout 機制以防止匯流排異常導致當機。
+- **資料結構**：在 `sketch.ino` 中正式定義了 `RtcTime` 與 `DhtData` 結構。
+
+### 技術細節
+- **ADDR Flag 清除**：STM32 I2C 控制器的 ADDR flag 需要讀取 SR1 後再讀取 SR2 才能清除，已在 `i2c_send_addr` 中實作。
+- **ACK/NACK 控制**：在讀取函式中加入 ACK 控制，以便在讀取多個 Byte 或最後一個 Byte 時正確操作。
+
+### 專案狀態
+- [x] 環境初始化完成。
+- [x] 確定開發策略與架構。
+- [x] 實作 I2C Bus Layer (Start/Stop/Write/Read/Addr)。
+- [ ] 待實作 1-Wire Bus Driver (DHT22)。
+- [ ] 待實作 DS1307 RTC 讀取驅動。
+- [ ] 待實作 LCD2004 (PCF8574) 驅動。
