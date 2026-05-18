@@ -43,17 +43,52 @@ struct DhtData {
     bool ok;
 };
 
-// --- Global Status & Variables ---
-RtcTime current_time = {0, 0, 0, 0, 0, 0, false};
-DhtData current_dht = {0.0f, 0.0f, false};
+// --- Device Drivers ---
 
-const unsigned long RTC_LCD_INTERVAL = 1000;
-const unsigned long DHT_INTERVAL = 5000;
+/**
+ * Convert Binary Coded Decimal (BCD) to Decimal
+ */
+uint8_t bcd2dec(uint8_t val) {
+    return ((val / 16 * 10) + (val % 16));
+}
 
-unsigned long lastRtcLcdUpdate = 0;
-unsigned long lastDhtUpdate = 0;
+/**
+ * Read current time from DS1307
+ */
+void ds1307_read_time(RtcTime* time) {
+    i2c_start();
+    i2c_send_addr(0x68, false); // DS1307 Write Address
+    i2c_write(0x00);            // Start from Register 0x00 (Seconds)
+    
+    i2c_start();                // Repeated Start
+    i2c_send_addr(0x68, true);  // DS1307 Read Address
+    
+    time->sec   = bcd2dec(i2c_read(true) & 0x7F);
+    time->min   = bcd2dec(i2c_read(true));
+    time->hour  = bcd2dec(i2c_read(true) & 0x3F);
+    (void)i2c_read(true);       // Skip Day of Week
+    time->day   = bcd2dec(i2c_read(true));
+    time->month = bcd2dec(i2c_read(true));
+    time->year  = bcd2dec(i2c_read(false)); // NACK on last byte
+    i2c_stop();
+    
+    time->ok = true; // In a real scenario, check I2C errors
+}
 
-// --- I2C Bus Layer (Bare-metal) ---
+// --- Helper Functions ---
+
+void print_time(const RtcTime* t) {
+    if (!t->ok) {
+        Serial.println("RTC: ERR");
+        return;
+    }
+    char buf[32];
+    sprintf(buf, "%04d/%02d/%02d %02d:%02d:%02d", 
+            2000 + t->year, t->month, t->day, t->hour, t->min, t->sec);
+    Serial.print(buf);
+}
+
+// --- Application Layer ---
 
 /**
  * Wait for I2C flag in SR1/SR2
