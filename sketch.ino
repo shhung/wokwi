@@ -31,18 +31,84 @@
 #define I2C1_CCR       (*((volatile uint32_t *)(I2C1_BASE + 0x1C)))
 #define I2C1_TRISE     (*((volatile uint32_t *)(I2C1_BASE + 0x20)))
 
-// --- Timing Constants ---
+// --- Data Structures ---
+struct RtcTime {
+    uint8_t year, month, day, hour, min, sec;
+    bool ok;
+};
+
+struct DhtData {
+    float temp;
+    float humd;
+    bool ok;
+};
+
+// --- Global Status & Variables ---
+RtcTime current_time = {0, 0, 0, 0, 0, 0, false};
+DhtData current_dht = {0.0f, 0.0f, false};
+
 const unsigned long RTC_LCD_INTERVAL = 1000;
 const unsigned long DHT_INTERVAL = 5000;
 
 unsigned long lastRtcLcdUpdate = 0;
 unsigned long lastDhtUpdate = 0;
 
-// --- Global Status ---
-bool rtc_ok = false;
-bool dht_ok = false;
+// --- I2C Bus Layer (Bare-metal) ---
 
-// --- Drivers Placeholder ---
+/**
+ * Wait for I2C flag in SR1/SR2
+ */
+void i2c_wait_flag(uint32_t flag, bool is_sr2 = false) {
+    uint32_t timeout = 100000;
+    if (is_sr2) {
+        while (!(I2C1_SR2 & flag) && --timeout);
+    } else {
+        while (!(I2C1_SR1 & flag) && --timeout);
+    }
+}
+
+/**
+ * Generate I2C Start Condition
+ */
+void i2c_start() {
+    I2C1_CR1 |= (1 << 8);  // START
+    i2c_wait_flag(1 << 0); // SB (Start Bit)
+}
+
+/**
+ * Generate I2C Stop Condition
+ */
+void i2c_stop() {
+    I2C1_CR1 |= (1 << 9);  // STOP
+}
+
+/**
+ * Write byte to I2C Bus
+ */
+void i2c_write(uint8_t data) {
+    I2C1_DR = data;
+    i2c_wait_flag(1 << 7); // TXE (Data register empty)
+}
+
+/**
+ * Read byte from I2C Bus
+ */
+uint8_t i2c_read(bool ack) {
+    if (ack) I2C1_CR1 |= (1 << 10); // ACK
+    else I2C1_CR1 &= ~(1 << 10);    // NACK
+
+    i2c_wait_flag(1 << 6); // RXNE (Data register not empty)
+    return (uint8_t)I2C1_DR;
+}
+
+/**
+ * Send Address
+ */
+void i2c_send_addr(uint8_t addr, bool read) {
+    I2C1_DR = (addr << 1) | (read ? 1 : 0);
+    i2c_wait_flag(1 << 1); // ADDR (Address sent)
+    (void)I2C1_SR2;        // Clear ADDR flag by reading SR2
+}
 
 /**
  * Initialize Hardware I2C1 (B6=SCL, B7=SDA)
