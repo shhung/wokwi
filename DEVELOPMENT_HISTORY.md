@@ -86,12 +86,27 @@
 - **ACK/NACK 控制**：在讀取函式中加入 ACK 控制，以便在讀取多個 Byte 或最後一個 Byte 時正確操作。
 
 ### 專案狀態
-- [x] 環境初始化完成。
-- [x] 確定開發策略與架構。
-- [x] 實作 I2C Bus Layer (Start/Stop/Write/Read/Addr)。
-- [x] 實作 DS1307 RTC 驅動並完成初步驗證。
+- [x] 完成軟體架構與資料結構規劃。
+- [x] 實作 I2C Bus Layer 與 DS1307 驅動。
+- [x] 修復編譯錯誤（函式宣告順序與程式碼殘留）。
 - [ ] 待實作 1-Wire Bus Driver (DHT22)。
 - [ ] 待實作 LCD2004 (PCF8574) 驅動。
+
+---
+
+## 2026-05-18: 修復編譯錯誤與程式碼重構
+
+### 使用者需求 (Prompt)
+- 回報 build failed 並提供詳細錯誤訊息。
+
+### 關鍵決策
+- **原因分析**：
+    1. **宣告順序錯誤**：`ds1307_read_time` 與 `print_time` 在 `loop()` 之後才定義，導致編譯器找不到符號。
+    2. **工具產生殘留**：`replace` 工具在多次編輯同一個區塊時產生了損壞的代碼片段（如 `d")`）。
+- **修復方案**：重新整理 `sketch.ino` 的結構，將所有函式定義移至 `setup()` 與 `loop()` 之前，並直接以 `write_file` 覆寫以確保乾淨的代碼狀態。
+
+### 技術細節
+- 統一了程式碼的分層順序：Register -> Struct -> Global Var -> Bus Layer -> Device Driver -> Helper -> Arduino Framework (setup/loop)。
 
 ---
 

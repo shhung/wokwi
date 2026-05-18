@@ -43,52 +43,17 @@ struct DhtData {
     bool ok;
 };
 
-// --- Device Drivers ---
+// --- Global Status & Variables ---
+RtcTime current_time = {0, 0, 0, 0, 0, 0, false};
+DhtData current_dht = {0.0f, 0.0f, false};
 
-/**
- * Convert Binary Coded Decimal (BCD) to Decimal
- */
-uint8_t bcd2dec(uint8_t val) {
-    return ((val / 16 * 10) + (val % 16));
-}
+const unsigned long RTC_LCD_INTERVAL = 1000;
+const unsigned long DHT_INTERVAL = 5000;
 
-/**
- * Read current time from DS1307
- */
-void ds1307_read_time(RtcTime* time) {
-    i2c_start();
-    i2c_send_addr(0x68, false); // DS1307 Write Address
-    i2c_write(0x00);            // Start from Register 0x00 (Seconds)
-    
-    i2c_start();                // Repeated Start
-    i2c_send_addr(0x68, true);  // DS1307 Read Address
-    
-    time->sec   = bcd2dec(i2c_read(true) & 0x7F);
-    time->min   = bcd2dec(i2c_read(true));
-    time->hour  = bcd2dec(i2c_read(true) & 0x3F);
-    (void)i2c_read(true);       // Skip Day of Week
-    time->day   = bcd2dec(i2c_read(true));
-    time->month = bcd2dec(i2c_read(true));
-    time->year  = bcd2dec(i2c_read(false)); // NACK on last byte
-    i2c_stop();
-    
-    time->ok = true; // In a real scenario, check I2C errors
-}
+unsigned long lastRtcLcdUpdate = 0;
+unsigned long lastDhtUpdate = 0;
 
-// --- Helper Functions ---
-
-void print_time(const RtcTime* t) {
-    if (!t->ok) {
-        Serial.println("RTC: ERR");
-        return;
-    }
-    char buf[32];
-    sprintf(buf, "%04d/%02d/%02d %02d:%02d:%02d", 
-            2000 + t->year, t->month, t->day, t->hour, t->min, t->sec);
-    Serial.print(buf);
-}
-
-// --- Application Layer ---
+// --- I2C Bus Layer (Bare-metal) ---
 
 /**
  * Wait for I2C flag in SR1/SR2
@@ -154,22 +119,68 @@ void i2c_init() {
     RCC_APB1ENR |= (1 << 21); // I2C1EN
 
     // 2. Configure PB6, PB7 as Alternate Function Open-Drain (50MHz)
-    // CNF=11 (AF-OD), MODE=11 (Output 50MHz) -> 0xF
     GPIOB_CRL &= ~(0xFF000000); // Clear PB6, PB7
-    GPIOB_CRL |=  (0xEE000000); // Set PB6, PB7 to AF-OD 2MHz (E=1110, but 0xF=1111 is safer for high speed)
+    GPIOB_CRL |=  (0xEE000000); // Set PB6, PB7 to AF-OD
     
     // 3. Reset I2C
     I2C1_CR1 |= (1 << 15);
     I2C1_CR1 &= ~(1 << 15);
 
-    // 4. Configure I2C Speed (Assuming 8MHz APB1 clock for simplicity in Wokwi)
-    I2C1_CR2 = 8;         // 8MHz
-    I2C1_CCR = 40;        // 100kHz Standard Mode (8MHz / (2 * 100kHz))
-    I2C1_TRISE = 9;       // 8MHz + 1
+    // 4. Configure I2C Speed (8MHz APB1 clock)
+    I2C1_CR2 = 8;         
+    I2C1_CCR = 40;        // 100kHz
+    I2C1_TRISE = 9;       
 
     // 5. Enable I2C
     I2C1_CR1 |= (1 << 0); // PE
 }
+
+// --- Device Drivers ---
+
+/**
+ * Convert Binary Coded Decimal (BCD) to Decimal
+ */
+uint8_t bcd2dec(uint8_t val) {
+    return ((val / 16 * 10) + (val % 16));
+}
+
+/**
+ * Read current time from DS1307
+ */
+void ds1307_read_time(RtcTime* time) {
+    i2c_start();
+    i2c_send_addr(0x68, false); // DS1307 Write Address
+    i2c_write(0x00);            // Start from Register 0x00 (Seconds)
+    
+    i2c_start();                // Repeated Start
+    i2c_send_addr(0x68, true);  // DS1307 Read Address
+    
+    time->sec   = bcd2dec(i2c_read(true) & 0x7F);
+    time->min   = bcd2dec(i2c_read(true));
+    time->hour  = bcd2dec(i2c_read(true) & 0x3F);
+    (void)i2c_read(true);       // Skip Day of Week
+    time->day   = bcd2dec(i2c_read(true));
+    time->month = bcd2dec(i2c_read(true));
+    time->year  = bcd2dec(i2c_read(false)); // NACK on last byte
+    i2c_stop();
+    
+    time->ok = true; 
+}
+
+// --- Helper Functions ---
+
+void print_time(const RtcTime* t) {
+    if (!t->ok) {
+        Serial.println("RTC: ERR");
+        return;
+    }
+    char buf[32];
+    sprintf(buf, "%04d/%02d/%02d %02d:%02d:%02d", 
+            2000 + t->year, t->month, t->day, t->hour, t->min, t->sec);
+    Serial.print(buf);
+}
+
+// --- Arduino Framework ---
 
 void setup() {
     Serial.begin(115200);
@@ -183,16 +194,28 @@ void loop() {
     // Task 1: RTC & LCD Update (1000ms)
     if (currentMillis - lastRtcLcdUpdate >= RTC_LCD_INTERVAL) {
         lastRtcLcdUpdate = currentMillis;
-        // TODO: Read DS1307
+        
+        // 1. Read RTC
+        ds1307_read_time(&current_time);
+        
+        // 2. Serial Output (Debug/Verification)
+        print_time(&current_time);
+        Serial.print(" | ");
+        if (current_dht.ok) {
+            Serial.print(current_dht.temp, 1);
+            Serial.print("⁰C | ");
+            Serial.print(current_dht.humd, 1);
+            Serial.println("%");
+        } else {
+            Serial.println("DHT: ERR");
+        }
+        
         // TODO: Update LCD2004
-        // TODO: Update Serial
-        Serial.println("Updating RTC & LCD...");
     }
 
     // Task 2: DHT22 Update (5000ms)
     if (currentMillis - lastDhtUpdate >= DHT_INTERVAL) {
         lastDhtUpdate = currentMillis;
-        // TODO: Read DHT22 (1-Wire)
-        Serial.println("Reading DHT22...");
+        // TODO: Read DHT22
     }
 }
