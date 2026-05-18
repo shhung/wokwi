@@ -185,11 +185,66 @@ void print_time(const RtcTime* t) {
 void setup() {
     Serial.begin(115200);
     i2c_init();
-    Serial.println("System Initialized (Bare-metal I2C configured)");
+    lcd_init();
+    Serial.println("System Initialized (I2C & LCD configured)");
 }
 
 void loop() {
     unsigned long currentMillis = millis();
+
+    // Task 1: RTC & LCD Update (1000ms)
+    if (currentMillis - lastRtcLcdUpdate >= RTC_LCD_INTERVAL) {
+        lastRtcLcdUpdate = currentMillis;
+        
+        // 1. Read RTC
+        ds1307_read_time(&current_time);
+        
+        // 2. Serial Output
+        print_time(&current_time);
+        Serial.print(" | ");
+        if (current_dht.ok) {
+            Serial.print(current_dht.temp, 1);
+            Serial.print("⁰C | ");
+            Serial.print(current_dht.humd, 1);
+            Serial.println("%");
+        } else {
+            Serial.println("DHT: ERR");
+        }
+        
+        // 3. LCD Display
+        char line1[21], line2[21], line3[21], line4[21];
+        
+        // Line 1: HH:MM:SS  YYYY/MM/DD
+        sprintf(line1, "%02d:%02d:%02d  %04d/%02d/%02d", 
+                current_time.hour, current_time.min, current_time.sec,
+                2000 + current_time.year, current_time.month, current_time.day);
+        
+        // Line 2: Temp: XXX.X⁰C
+        if (current_dht.ok) sprintf(line2, "Temp: %5.1f\xDF""C", current_dht.temp); // \xDF is degree symbol in HD44780
+        else sprintf(line2, "Temp: ---.-");
+
+        // Line 3: Humd: XXX.X%
+        if (current_dht.ok) sprintf(line3, "Humd: %5.1f%%", current_dht.humd);
+        else sprintf(line3, "Humd: ---.-%%");
+
+        // Line 4: RTC: OK   DHT: OK
+        sprintf(line4, "RTC: %s   DHT: %s", 
+                current_time.ok ? "OK " : "ERR",
+                current_dht.ok ? "OK " : "ERR");
+
+        lcd_set_cursor(0, 0); lcd_print(line1);
+        lcd_set_cursor(0, 1); lcd_print(line2);
+        lcd_set_cursor(0, 2); lcd_print(line3);
+        lcd_set_cursor(0, 3); lcd_print(line4);
+    }
+
+    // Task 2: DHT22 Update (5000ms)
+    if (currentMillis - lastDhtUpdate >= DHT_INTERVAL) {
+        lastDhtUpdate = currentMillis;
+        // TODO: Read DHT22
+    }
+}
+llis();
 
     // Task 1: RTC & LCD Update (1000ms)
     if (currentMillis - lastRtcLcdUpdate >= RTC_LCD_INTERVAL) {
