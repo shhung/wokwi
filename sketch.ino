@@ -100,50 +100,45 @@ void i2c_init() {
 // --- DHT22 Driver (PA0) ---
 
 void dht_set_output() {
-    GPIOA_CRL &= ~(0xF); // Clear PA0
-    GPIOA_CRL |= (1 << 1) | (1 << 0); // Output 2MHz, Push-Pull (Actually OD is better for 1-wire but let's use PP for simulator)
+    GPIOA_CRL &= ~(0xF); 
+    GPIOA_CRL |= (1 << 1) | (1 << 0); 
 }
 
 void dht_set_input() {
     GPIOA_CRL &= ~(0xF);
-    GPIOA_CRL |= (1 << 2); // Input Floating
+    GPIOA_CRL |= (1 << 2); 
 }
 
 bool dht_read_data(DhtData* data) {
     uint8_t bytes[5] = {0};
-    
-    // 1. Start Signal
     dht_set_output();
-    GPIOA_ODR &= ~(1 << 0); // Low
-    delay(20);              // > 18ms
-    GPIOA_ODR |= (1 << 0);  // High
+    GPIOA_ODR &= ~(1 << 0);
+    delay(20);
+    GPIOA_ODR |= (1 << 0);
     delayMicroseconds(30);
     dht_set_input();
 
-    // 2. Wait for Response (80us Low + 80us High)
     uint32_t timeout = 1000;
-    while ((GPIOA_IDR & (1 << 0)) && --timeout); // Wait for Low
+    while ((GPIOA_IDR & (1 << 0)) && --timeout); 
     if (timeout == 0) return false;
     timeout = 1000;
-    while (!(GPIOA_IDR & (1 << 0)) && --timeout); // Wait for High
+    while (!(GPIOA_IDR & (1 << 0)) && --timeout);
     if (timeout == 0) return false;
     timeout = 1000;
-    while ((GPIOA_IDR & (1 << 0)) && --timeout); // Wait for Low again (Start of bits)
+    while ((GPIOA_IDR & (1 << 0)) && --timeout);
     if (timeout == 0) return false;
 
-    // 3. Read 40 bits
     for (int i = 0; i < 40; i++) {
         timeout = 1000;
-        while (!(GPIOA_IDR & (1 << 0)) && --timeout); // Wait for bit High
-        delayMicroseconds(40); // 26-28us is '0', 70us is '1'
+        while (!(GPIOA_IDR & (1 << 0)) && --timeout);
+        delayMicroseconds(40);
         if (GPIOA_IDR & (1 << 0)) {
             bytes[i/8] |= (1 << (7 - (i%8)));
             timeout = 1000;
-            while ((GPIOA_IDR & (1 << 0)) && --timeout); // Wait for bit Low
+            while ((GPIOA_IDR & (1 << 0)) && --timeout);
         }
     }
 
-    // 4. Verify Checksum
     if (bytes[4] == ((bytes[0] + bytes[1] + bytes[2] + bytes[3]) & 0xFF)) {
         int16_t h = (bytes[0] << 8) | bytes[1];
         int16_t t = ((bytes[2] & 0x7F) << 8) | bytes[3];
@@ -153,6 +148,7 @@ bool dht_read_data(DhtData* data) {
         data->ok = true;
         return true;
     }
+    data->ok = false;
     return false;
 }
 
@@ -189,6 +185,10 @@ void lcd_send(uint8_t value, uint8_t mode) {
 
 void lcd_command(uint8_t cmd) { lcd_send(cmd, 0); }
 void lcd_data(uint8_t data)   { lcd_send(data, PIN_RS); }
+
+void lcd_print(const char* str) {
+    while (*str) lcd_data(*str++);
+}
 
 void lcd_init() {
     delay(100);
@@ -235,20 +235,19 @@ void setup() {
 void loop() {
     unsigned long currentMillis = millis();
 
-    // RTC & LCD (1000ms)
     if (currentMillis - lastRtcLcdUpdate >= 1000) {
         lastRtcLcdUpdate = currentMillis;
         ds1307_read_time(&current_time);
         
-        char buf[64];
+        // Serial Output
         if (current_time.ok) {
+            char buf[64];
             sprintf(buf, "%04d/%02d/%02d %02d:%02d:%02d", 2000+current_time.year, current_time.month, current_time.day, current_time.hour, current_time.min, current_time.sec);
+            Serial.print(buf);
         } else {
-            sprintf(buf, "日期：----/--/-- 時間：--:--:--");
+            Serial.print("RTC: ERR");
         }
-        Serial.print(buf);
         Serial.print(" | ");
-        
         if (current_dht.ok) {
             Serial.print(current_dht.temp, 1); Serial.print("C | ");
             Serial.print(current_dht.humd, 1); Serial.println("%");
@@ -266,13 +265,12 @@ void loop() {
         sprintf(l4, "RTC: %s   DHT: %s", current_time.ok ? "OK " : "ERR", current_dht.ok ? "OK " : "ERR");
 
         uint8_t off[] = {0x00, 0x40, 0x14, 0x54};
-        lcd_command(0x80 | off[0]); { while (*l1) lcd_data(*l1++); }
-        lcd_command(0x80 | off[1]); { while (*l2) lcd_data(*l2++); }
-        lcd_command(0x80 | off[2]); { while (*l3) lcd_data(*l3++); }
-        lcd_command(0x80 | off[3]); { while (*l4) lcd_data(*l4++); }
+        lcd_command(0x80 | off[0]); lcd_print(l1);
+        lcd_command(0x80 | off[1]); lcd_print(l2);
+        lcd_command(0x80 | off[2]); lcd_print(l3);
+        lcd_command(0x80 | off[3]); lcd_print(l4);
     }
 
-    // DHT (5000ms)
     if (currentMillis - lastDhtUpdate >= 5000) {
         lastDhtUpdate = currentMillis;
         dht_read_data(&current_dht);
