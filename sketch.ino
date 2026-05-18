@@ -3,7 +3,7 @@
  * 
  * Features:
  * - Bare-metal I2C Driver for DS1307 RTC & LCD2004 (via PCF8574)
- * - Custom 1-Wire Driver for DHT22
+ * - Custom 1-Wire Driver for DHT22 (PA0)
  * - Super Loop with Non-blocking Timing
  */
 
@@ -12,6 +12,9 @@
 // --- Register Definitions ---
 #define RCC_APB2ENR    (*((volatile uint32_t *)0x40021018))
 #define RCC_APB1ENR    (*((volatile uint32_t *)0x4002101C))
+#define GPIOA_CRL      (*((volatile uint32_t *)0x40010800))
+#define GPIOA_ODR      (*((volatile uint32_t *)0x4001080C))
+#define GPIOA_IDR      (*((volatile uint32_t *)0x40010808))
 #define GPIOB_CRL      (*((volatile uint32_t *)0x40010C00))
 
 #define I2C1_BASE      (0x40005400)
@@ -40,10 +43,10 @@ DhtData current_dht = {0.0f, 0.0f, false};
 unsigned long lastRtcLcdUpdate = 0;
 unsigned long lastDhtUpdate = 0;
 
-// --- I2C Bus Layer (with Timeout Protection) ---
+// --- I2C Bus Layer ---
 
 bool i2c_wait_flag(uint32_t flag, bool is_sr2 = false) {
-    uint32_t timeout = 5000; // Reduced timeout for faster recovery
+    uint32_t timeout = 5000;
     if (is_sr2) {
         while (!(I2C1_SR2 & flag) && --timeout) delayMicroseconds(1);
     } else {
@@ -81,24 +84,79 @@ bool i2c_send_addr(uint8_t addr, bool read) {
 }
 
 void i2c_init() {
-    RCC_APB2ENR |= (1 << 3);  // IOPBEN
-    RCC_APB1ENR |= (1 << 21); // I2C1EN
-    
-    // PB6, PB7: AF-OD (2MHz is enough for 100kHz I2C)
+    RCC_APB2ENR |= (1 << 3) | (1 << 2); // IOPB, IOPA
+    RCC_APB1ENR |= (1 << 21);
     GPIOB_CRL &= ~(0xFF000000);
     GPIOB_CRL |=  (0xEE000000); 
-
-    I2C1_CR1 |= (1 << 15); // SWRST
+    I2C1_CR1 |= (1 << 15);
     delay(10);
     I2C1_CR1 &= ~(1 << 15);
-
     I2C1_CR2 = 8;         
     I2C1_CCR = 40;        
     I2C1_TRISE = 9;       
-    I2C1_CR1 |= (1 << 0); // PE
+    I2C1_CR1 |= (1 << 0);
 }
 
-// --- LCD2004 via PCF8574 Driver ---
+// --- DHT22 Driver (PA0) ---
+
+void dht_set_output() {
+    GPIOA_CRL &= ~(0xF); // Clear PA0
+    GPIOA_CRL |= (1 << 1) | (1 << 0); // Output 2MHz, Push-Pull (Actually OD is better for 1-wire but let's use PP for simulator)
+}
+
+void dht_set_input() {
+    GPIOA_CRL &= ~(0xF);
+    GPIOA_CRL |= (1 << 2); // Input Floating
+}
+
+bool dht_read_data(DhtData* data) {
+    uint8_t bytes[5] = {0};
+    
+    // 1. Start Signal
+    dht_set_output();
+    GPIOA_ODR &= ~(1 << 0); // Low
+    delay(20);              // > 18ms
+    GPIOA_ODR |= (1 << 0);  // High
+    delayMicroseconds(30);
+    dht_set_input();
+
+    // 2. Wait for Response (80us Low + 80us High)
+    uint32_t timeout = 1000;
+    while ((GPIOA_IDR & (1 << 0)) && --timeout); // Wait for Low
+    if (timeout == 0) return false;
+    timeout = 1000;
+    while (!(GPIOA_IDR & (1 << 0)) && --timeout); // Wait for High
+    if (timeout == 0) return false;
+    timeout = 1000;
+    while ((GPIOA_IDR & (1 << 0)) && --timeout); // Wait for Low again (Start of bits)
+    if (timeout == 0) return false;
+
+    // 3. Read 40 bits
+    for (int i = 0; i < 40; i++) {
+        timeout = 1000;
+        while (!(GPIOA_IDR & (1 << 0)) && --timeout); // Wait for bit High
+        delayMicroseconds(40); // 26-28us is '0', 70us is '1'
+        if (GPIOA_IDR & (1 << 0)) {
+            bytes[i/8] |= (1 << (7 - (i%8)));
+            timeout = 1000;
+            while ((GPIOA_IDR & (1 << 0)) && --timeout); // Wait for bit Low
+        }
+    }
+
+    // 4. Verify Checksum
+    if (bytes[4] == ((bytes[0] + bytes[1] + bytes[2] + bytes[3]) & 0xFF)) {
+        int16_t h = (bytes[0] << 8) | bytes[1];
+        int16_t t = ((bytes[2] & 0x7F) << 8) | bytes[3];
+        if (bytes[2] & 0x80) t *= -1;
+        data->humd = h / 10.0;
+        data->temp = t / 10.0;
+        data->ok = true;
+        return true;
+    }
+    return false;
+}
+
+// --- LCD2004 via PCF8574 ---
 #define LCD_ADDR 0x27
 #define PIN_RS  (1 << 0)
 #define PIN_RW  (1 << 1)
@@ -107,9 +165,7 @@ void i2c_init() {
 
 void pcf8574_write(uint8_t data) {
     i2c_start();
-    if (i2c_send_addr(LCD_ADDR, false)) {
-        i2c_write(data | PIN_BL);
-    }
+    if (i2c_send_addr(LCD_ADDR, false)) i2c_write(data | PIN_BL);
     i2c_stop();
 }
 
@@ -117,7 +173,7 @@ void lcd_pulse(uint8_t data) {
     pcf8574_write(data | PIN_EN);
     delayMicroseconds(2);
     pcf8574_write(data & ~PIN_EN);
-    delayMicroseconds(40);
+    delayMicroseconds(50);
 }
 
 void lcd_send_4bit(uint8_t nibble, uint8_t mode) {
@@ -135,29 +191,19 @@ void lcd_command(uint8_t cmd) { lcd_send(cmd, 0); }
 void lcd_data(uint8_t data)   { lcd_send(data, PIN_RS); }
 
 void lcd_init() {
-    delay(100); // Wait for LCD power up
+    delay(100);
     lcd_send_4bit(0x03, 0); delay(5);
-    lcd_send_4bit(0x03, 0); delay(1);
-    lcd_send_4bit(0x03, 0);
+    lcd_send_4bit(0x03, 0); delay(5);
+    lcd_send_4bit(0x03, 0); delay(5);
     lcd_send_4bit(0x02, 0);
-    
-    lcd_command(0x28); // 4-bit, 2-line, 5x8
-    lcd_command(0x0C); // Display ON
-    lcd_command(0x06); // Entry Mode
-    lcd_command(0x01); // Clear
+    lcd_command(0x28);
+    lcd_command(0x0C);
+    lcd_command(0x06);
+    lcd_command(0x01);
     delay(5);
 }
 
-void lcd_set_cursor(uint8_t col, uint8_t row) {
-    uint8_t offsets[] = {0x00, 0x40, 0x14, 0x54};
-    lcd_command(0x80 | (col + offsets[row]));
-}
-
-void lcd_print(const char* str) {
-    while (*str) lcd_data(*str++);
-}
-
-// --- RTC DS1307 Driver ---
+// --- RTC DS1307 ---
 uint8_t bcd2dec(uint8_t val) { return ((val / 16 * 10) + (val % 16)); }
 
 void ds1307_read_time(RtcTime* time) {
@@ -177,10 +223,10 @@ void ds1307_read_time(RtcTime* time) {
     time->ok = true;
 }
 
-// --- Arduino Framework ---
+// --- Framework ---
 void setup() {
     Serial.begin(115200);
-    delay(100); 
+    delay(500);
     i2c_init();
     lcd_init();
     Serial.println("System Initialized");
@@ -189,19 +235,20 @@ void setup() {
 void loop() {
     unsigned long currentMillis = millis();
 
+    // RTC & LCD (1000ms)
     if (currentMillis - lastRtcLcdUpdate >= 1000) {
         lastRtcLcdUpdate = currentMillis;
         ds1307_read_time(&current_time);
         
-        // Serial Output
+        char buf[64];
         if (current_time.ok) {
-            char buf[32];
             sprintf(buf, "%04d/%02d/%02d %02d:%02d:%02d", 2000+current_time.year, current_time.month, current_time.day, current_time.hour, current_time.min, current_time.sec);
-            Serial.print(buf);
         } else {
-            Serial.print("RTC: ERR");
+            sprintf(buf, "日期：----/--/-- 時間：--:--:--");
         }
+        Serial.print(buf);
         Serial.print(" | ");
+        
         if (current_dht.ok) {
             Serial.print(current_dht.temp, 1); Serial.print("C | ");
             Serial.print(current_dht.humd, 1); Serial.println("%");
@@ -210,20 +257,24 @@ void loop() {
         }
 
         // LCD Output
-        char line1[21], line2[21], line3[21], line4[21];
-        if (current_time.ok) {
-            sprintf(line1, "%02d:%02d:%02d  %04d/%02d/%02d", current_time.hour, current_time.min, current_time.sec, 2000+current_time.year, current_time.month, current_time.day);
-        } else {
-            sprintf(line1, "--:----  ----/--/--");
-        }
-        
-        sprintf(line2, "Temp: %s", current_dht.ok ? "XX.X" : "---.-");
-        sprintf(line3, "Humd: %s", current_dht.ok ? "XX.X" : "---.-");
-        sprintf(line4, "RTC: %s   DHT: %s", current_time.ok ? "OK " : "ERR", current_dht.ok ? "OK " : "ERR");
+        char l1[21], l2[21], l3[21], l4[21];
+        sprintf(l1, "%02d:%02d:%02d  %04d/%02d/%02d", current_time.hour, current_time.min, current_time.sec, 2000+current_time.year, current_time.month, current_time.day);
+        if (current_dht.ok) sprintf(l2, "Temp: %5.1f\xDF""C", current_dht.temp);
+        else sprintf(l2, "Temp: ---.-");
+        if (current_dht.ok) sprintf(l3, "Humd: %5.1f%%", current_dht.humd);
+        else sprintf(l3, "Humd: ---.-%%");
+        sprintf(l4, "RTC: %s   DHT: %s", current_time.ok ? "OK " : "ERR", current_dht.ok ? "OK " : "ERR");
 
-        lcd_set_cursor(0, 0); lcd_print(line1);
-        lcd_set_cursor(0, 1); lcd_print(line2);
-        lcd_set_cursor(0, 2); lcd_print(line3);
-        lcd_set_cursor(0, 3); lcd_print(line4);
+        uint8_t off[] = {0x00, 0x40, 0x14, 0x54};
+        lcd_command(0x80 | off[0]); { while (*l1) lcd_data(*l1++); }
+        lcd_command(0x80 | off[1]); { while (*l2) lcd_data(*l2++); }
+        lcd_command(0x80 | off[2]); { while (*l3) lcd_data(*l3++); }
+        lcd_command(0x80 | off[3]); { while (*l4) lcd_data(*l4++); }
+    }
+
+    // DHT (5000ms)
+    if (currentMillis - lastDhtUpdate >= 5000) {
+        lastDhtUpdate = currentMillis;
+        dht_read_data(&current_dht);
     }
 }

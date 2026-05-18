@@ -88,8 +88,25 @@
 ### 專案狀態
 - [x] 完成軟體架構與資料結構規劃。
 - [x] 實作 I2C Bus Layer 與 DS1307 驅動。
-- [x] 修復 I2C 掛起問題與優化 LCD 驅動。
-- [ ] 待實作 1-Wire Bus Driver (DHT22)。
+- [x] 實作 DHT22 (1-Wire) 驅動。
+- [x] 整合 Serial 輸出格式化邏輯。
+- [ ] 待修復 LCD 顯示問題。
+
+---
+
+## 2026-05-18: 實作 DHT22 驅動與系統整合
+
+### 使用者需求 (Prompt)
+- 目前 RTC 與 Serial 輸出正常，但 LCD 依舊無畫面。
+- 建議先將 DHT 打通。
+
+### 關鍵決策
+- **DHT22 (1-Wire) 實作**：使用 PA0 腳位。由於 STM32F103 無硬體 1-Wire，採用 **Bit-banging** 方式。
+    - 實作了 Start Signal (18ms Low)。
+    - 使用精確的 `delayMicroseconds` 捕捉 DHT22 的 40-bit 響應。
+    - 加入 Checksum 校驗邏輯。
+- **LCD 佈局優化**：為了代碼精簡，將 `lcd_set_cursor` 與 `lcd_print` 邏輯內聯化到 `loop()` 中，減少函式呼叫。
+- **初始化延遲**：將 `setup` 的初始延遲增加到 500ms，確保所有外設上電穩定。
 
 ---
 
