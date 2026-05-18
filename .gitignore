@@ -1,0 +1,8 @@
+# Node.js / Python / General
+node_modules/
+__pycache__/
+*.log
+.env
+
+# Gemini CLI
+.gemini/
