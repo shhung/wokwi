@@ -47,6 +47,38 @@
 - [ ] 待實作 I2C Bus Driver (Start/Stop/Write/Read)。
 - [ ] 待實作 1-Wire Bus Driver (DHT22)。
 - [ ] 待實作 LCD2004 驅動與 RTC 讀取。
+
+---
+
+## 2026-05-18: 程式架構與資料結構設計
+
+### 使用者需求 (Prompt)
+- 目前已有基本 Serial 輸出，確認 Super loop 運作正常。
+- 在接續開發前，要求說明更詳細的程式架構，包含預計如何分層、設計怎樣的資料結構。
+
+### 關鍵決策與架構規劃
+**1. 軟體分層設計 (Layering)**
+為維持 Bare-metal 的極簡性同時保持可維護性，程式將分為三層：
+- **硬體抽象層 (HAL/Bus Layer)**:
+    - 負責最底層的時序與暫存器操作。
+    - `i2c_start()`, `i2c_write()`, `i2c_read()`
+    - `onewire_reset()`, `onewire_write_bit()`, `onewire_read_bit()`
+- **裝置驅動層 (Device Driver Layer)**:
+    - 利用 Bus Layer 提供的 API 與具體感測器/顯示器溝通。
+    - `ds1307_read_time()`
+    - `pcf8574_lcd_write_cmd()`, `pcf8574_lcd_print()`
+    - `dht22_read_data()`
+- **應用邏輯層 (Application Layer)**:
+    - `setup()` 與 `loop()` 所在，負責任務排程 (1000ms/5000ms)、狀態更新與畫面刷新邏輯。
+
+**2. 資料結構設計 (Data Structures)**
+使用 `struct` 來統一管理設備狀態，避免全域變數散落。
+- **RTC 結構**: `struct RtcTime { uint8_t year, month, day, hour, min, sec; bool ok; };`
+- **DHT 結構**: `struct DhtData { float temp; float humd; bool ok; };`
+
+### 專案狀態
+- [x] 完成軟體架構與資料結構規劃。
+- [ ] 待實作 I2C Bus Layer 與 DS1307 讀取。
 *LCD2004 I2C 位址 (0x27)**：雖然使用者提及電路圖未見轉接板，但 0x27 是典型的 PCF8574 轉接板位址。實作時將針對 PCF8574 + HD44780 組合進行驅動開發。
 - **STM32 Hardware I2C**：將直接配置 STM32F103 的暫存器（CR1, CR2, OAR1, DR, SR1, SR2）來實現 I2C 通訊。
 
