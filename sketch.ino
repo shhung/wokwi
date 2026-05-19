@@ -207,47 +207,47 @@ void loop() {
             Serial.print("----/--/-- --:--:--");
         }
         Serial.print(" | ");
-        if (current_dht.ok) { Serial.print(current_dht.temp, 1); Serial.print("\xC2\xB0\x43 | "); Serial.print(current_dht.humd, 1); Serial.println("%"); }
-        else { Serial.println("- | -"); }
+        if (current_dht.ok) { 
+            Serial.print(current_dht.temp, 1); Serial.print("\xC2\xB0\x43 | "); 
+            Serial.print(current_dht.humd, 1); Serial.println("%"); 
+        } else { 
+            Serial.println("- | -"); 
+        }
 
         // LCD layout
-        if (!current_time.ok) {
-            lcd_cmd(0x80 | 0x00); const char* t1 = "Time: --:--:--      "; while(*t1) lcd_dat(*t1++);
-            lcd_cmd(0x80 | 0x40); const char* t2 = "Date: ----/--/--    "; while(*t2) lcd_dat(*t2++);
-            lcd_cmd(0x80 | 0x14); const char* t3 = "Status: RTC: ERR    "; while(*t3) lcd_dat(*t3++);
-            lcd_cmd(0x80 | 0x54); const char* t4 = "                    "; while(*t4) lcd_dat(*t4++);
-        } else {
-            char l[21];
-            // Line 1: HH:MM:SS  YYYY/MM/DD
+        char l[21];
+        // Line 1: HH:MM:SS  YYYY/MM/DD
+        if (current_time.ok)
             sprintf(l, "%02d:%02d:%02d  %04d/%02d/%02d", current_time.hour, current_time.min, current_time.sec, 2000+current_time.year, current_time.month, current_time.day);
-            lcd_cmd(0x80 | 0x00); for(int i=0; l[i]&&i<20; i++) lcd_dat(l[i]);
-            
-            // Line 2: Temp: XXX.X⁰C
-            lcd_cmd(0x80 | 0x40);
-            if (current_dht.ok) {
-                String t_str = String(current_dht.temp, 1);
-                sprintf(l, "Temp: %s ", t_str.c_str());
-                for(int i=0; l[i]&&i<20; i++) lcd_dat(l[i]);
-                lcd_dat(0xDF); lcd_dat('C');
-            } else {
-                const char* err = "Temp: ---.- \xDF\x43    "; while(*err) lcd_dat(*err++);
-            }
-
-            // Line 3: Humd: XXX.X%
-            lcd_cmd(0x80 | 0x14);
-            if (current_dht.ok) {
-                String h_str = String(current_dht.humd, 1);
-                sprintf(l, "Humd: %s %%     ", h_str.c_str());
-                for(int i=0; l[i]&&i<20; i++) lcd_dat(l[i]);
-            } else {
-                const char* err = "Humd: ---.- %       "; while(*err) lcd_dat(*err++);
-            }
-
-            // Line 4: RTC: OK   DHT: OK
-            lcd_cmd(0x80 | 0x54);
-            sprintf(l, "RTC: OK   DHT: %s", current_dht.ok?"OK ":"ERR");
+        else
+            sprintf(l, "--:--:--  ----/--/--");
+        lcd_cmd(0x80 | 0x00); for(int i=0; l[i]&&i<20; i++) lcd_dat(l[i]);
+        
+        // Line 2: Temp: XXX.X⁰C
+        lcd_cmd(0x80 | 0x40);
+        if (current_dht.ok) {
+            String t_str = String(current_dht.temp, 1);
+            sprintf(l, "Temp: %s ", t_str.c_str());
             for(int i=0; l[i]&&i<20; i++) lcd_dat(l[i]);
+            lcd_dat(0xDF); lcd_dat('C');
+        } else {
+            const char* err = "Temp: ---.- \xDF\x43    "; while(*err) lcd_dat(*err++);
         }
+
+        // Line 3: Humd: XXX.X%
+        lcd_cmd(0x80 | 0x14);
+        if (current_dht.ok) {
+            String h_str = String(current_dht.humd, 1);
+            sprintf(l, "Humd: %s %%     ", h_str.c_str());
+            for(int i=0; l[i]&&i<20; i++) lcd_dat(l[i]);
+        } else {
+            const char* err = "Humd: ---.- %       "; while(*err) lcd_dat(*err++);
+        }
+
+        // Line 4: RTC: OK   DHT: OK
+        lcd_cmd(0x80 | 0x54);
+        sprintf(l, "RTC: %s  DHT: %s", current_time.ok?"OK ":"ERR", current_dht.ok?"OK ":"ERR");
+        for(int i=0; l[i]&&i<20; i++) lcd_dat(l[i]);
     }
     if (now - lastDhtUpdate >= 5000) {
         lastDhtUpdate = now;
