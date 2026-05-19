@@ -29,13 +29,14 @@ DhtData current_dht = {0.0f, 0.0f, false};
 unsigned long lastRtcLcdUpdate = 0;
 unsigned long lastDhtUpdate = 0;
 uint8_t lcd_addr = 0x27;
+char lcd_buf[4][21] = {"", "", "", ""};
 
 // --- I2C Bus Layer (Enhanced Bit-Banging with Timeout) ---
 #define SCL_PIN 6
 #define SDA_PIN 7
 
 // Conservative delay for simulation stability
-#define I2C_DELAY() delayMicroseconds(25)
+#define I2C_DELAY() delayMicroseconds(20)
 
 void sda_high() { GPIOB_BSRR = (1 << SDA_PIN); }
 void sda_low()  { GPIOB_BRR  = (1 << SDA_PIN); }
@@ -87,7 +88,7 @@ uint8_t i2c_read(bool ack) {
     sda_high(); I2C_DELAY();
     for (int i = 0; i < 8; i++) {
         scl_high(); I2C_DELAY();
-        I2C_DELAY(); // Wait for data to settle
+        I2C_DELAY(); 
         if (sda_read()) data |= (1 << (7 - i));
         scl_low();  I2C_DELAY();
     }
@@ -128,7 +129,7 @@ bool dht_read_data(DhtData* data) {
     data->ok = false; return false;
 }
 
-// --- LCD Driver ---
+// --- LCD Driver (Optimized) ---
 #define PIN_RS (1<<0)
 #define PIN_RW (1<<1)
 #define PIN_EN (1<<2)
@@ -138,19 +139,39 @@ void pcf_write(uint8_t d) {
     i2c_start(); 
     if (i2c_write(lcd_addr << 1)) i2c_write(d | PIN_BL); 
     i2c_stop(); 
-    delayMicroseconds(200); 
 }
-void lcd_pulse(uint8_t d) { pcf_write(d|PIN_EN); delayMicroseconds(40); pcf_write(d&~PIN_EN); delayMicroseconds(200); }
-void lcd_send_4(uint8_t n, uint8_t m) { uint8_t d=(n<<4)|m; pcf_write(d); lcd_pulse(d); }
+
+void lcd_send_4(uint8_t n, uint8_t m) {
+    uint8_t d = (n << 4) | m | PIN_BL;
+    i2c_start();
+    if (i2c_write(lcd_addr << 1)) {
+        i2c_write(d);
+        i2c_write(d | PIN_EN);
+        i2c_write(d);
+    }
+    i2c_stop();
+}
+
 void lcd_send(uint8_t v, uint8_t m)   { lcd_send_4(v>>4, m); lcd_send_4(v&0x0F, m); }
-void lcd_cmd(uint8_t c) { lcd_send(c, 0); }
+void lcd_cmd(uint8_t c) { lcd_send(c, 0); delayMicroseconds(100); }
 void lcd_dat(uint8_t d) { lcd_send(d, PIN_RS); }
 
 void lcd_init() {
-    delay(200);
-    lcd_send_4(0x03, 0); delay(10); lcd_send_4(0x03, 0); delay(5); lcd_send_4(0x03, 0); delay(5);
-    lcd_send_4(0x02, 0); delay(5);
-    lcd_cmd(0x28); delay(2); lcd_cmd(0x0C); delay(2); lcd_cmd(0x06); delay(2); lcd_cmd(0x01); delay(10);
+    delay(100);
+    lcd_send_4(0x03, 0); delay(5); lcd_send_4(0x03, 0); delay(1); lcd_send_4(0x03, 0); delay(1);
+    lcd_send_4(0x02, 0); delay(1);
+    lcd_cmd(0x28); lcd_cmd(0x0C); lcd_cmd(0x06); lcd_cmd(0x01); delay(5);
+}
+
+void lcd_write_line(int row, const char* txt) {
+    if (strcmp(lcd_buf[row], txt) == 0) return;
+    strncpy(lcd_buf[row], txt, 20);
+    lcd_buf[row][20] = '\0';
+    uint8_t pos[] = {0x00, 0x40, 0x14, 0x54};
+    lcd_cmd(0x80 | pos[row]);
+    for (int i = 0; i < 20; i++) {
+        if (txt[i]) lcd_dat(txt[i]); else lcd_dat(' ');
+    }
 }
 
 // --- RTC Driver ---
@@ -160,15 +181,10 @@ void ds1307_init() {
     if (i2c_write(0x68 << 1)) {
         i2c_write(0x00); i2c_start(); i2c_write((0x68 << 1) | 1);
         uint8_t s = i2c_read(false); i2c_stop();
-        if ((s & 0x80) || (s == 0)) {
+        if (s & 0x80) {
             i2c_start(); i2c_write(0x68 << 1); i2c_write(0x00); 
-            i2c_write(0x00); // sec
-            i2c_write(0x40); // min
-            i2c_write(0x12); // hour
-            i2c_write(0x01); // dow
-            i2c_write(0x19); // day
-            i2c_write(0x05); // month
-            i2c_write(0x26); // year
+            i2c_write(0x00); i2c_write(0x40); i2c_write(0x12); 
+            i2c_write(0x01); i2c_write(0x19); i2c_write(0x05); i2c_write(0x26); 
             i2c_stop();
         }
     }
@@ -178,13 +194,22 @@ void ds1307_read(RtcTime* t) {
     i2c_start();
     if (!i2c_write(0x68 << 1)) { i2c_stop(); t->ok = false; return; }
     i2c_write(0x00); 
-    i2c_start(); // Repeated Start
+    i2c_start(); 
     if (!i2c_write((0x68 << 1) | 1)) { i2c_stop(); t->ok = false; return; }
-    t->sec=b2d(i2c_read(true)&0x7F); t->min=b2d(i2c_read(true)); t->hour=b2d(i2c_read(true)&0x3F);
-    (void)i2c_read(true); t->day=b2d(i2c_read(true)); t->month=b2d(i2c_read(true)); t->year=b2d(i2c_read(false));
+    uint8_t raw[7];
+    for(int i=0; i<6; i++) raw[i] = i2c_read(true);
+    raw[6] = i2c_read(false);
     i2c_stop();
-    if (t->month == 0 || t->day == 0 || t->month > 12) t->ok = false;
-    else t->ok = true;
+    t->sec=b2d(raw[0]&0x7F); t->min=b2d(raw[1]); t->hour=b2d(raw[2]&0x3F);
+    t->day=b2d(raw[4]); t->month=b2d(raw[5]); t->year=b2d(raw[6]);
+    if (t->month == 0 || t->month > 12 || t->day == 0 || t->day > 31) {
+        t->ok = false;
+        Serial.print("RTC DATA ERR: "); 
+        for(int i=0; i<7; i++) { Serial.print(raw[i], HEX); Serial.print(" "); }
+        Serial.println();
+    } else {
+        t->ok = true;
+    }
 }
 
 void setup() {
@@ -222,35 +247,31 @@ void loop() {
         }
 
         // LCD layout
-        char l[21];
+        char line[21];
         if (current_time.ok)
-            sprintf(l, "%02d:%02d:%02d  %04d/%02d/%02d", current_time.hour, current_time.min, current_time.sec, 2000+current_time.year, current_time.month, current_time.day);
+            sprintf(line, "%02d:%02d:%02d  %04d/%02d/%02d", current_time.hour, current_time.min, current_time.sec, 2000+current_time.year, current_time.month, current_time.day);
         else
-            sprintf(l, "--:--:--  ----/--/--");
-        lcd_cmd(0x80 | 0x00); for(int i=0; l[i]&&i<20; i++) lcd_dat(l[i]);
+            sprintf(line, "--:--:--  ----/--/--");
+        lcd_write_line(0, line);
         
-        lcd_cmd(0x80 | 0x40);
         if (current_dht.ok) {
             String t_str = String(current_dht.temp, 1);
-            sprintf(l, "Temp: %6s", t_str.c_str());
-            for(int i=0; l[i]&&i<20; i++) lcd_dat(l[i]);
-            lcd_dat(0xDF); lcd_dat('C');
+            sprintf(line, "Temp: %6s \xDF\x43", t_str.c_str());
         } else {
-            const char* err = "Temp: ---.- \xDF\x43    "; while(*err) lcd_dat(*err++);
+            sprintf(line, "Temp: ---.- \xDF\x43");
         }
+        lcd_write_line(1, line);
 
-        lcd_cmd(0x80 | 0x14);
         if (current_dht.ok) {
             String h_str = String(current_dht.humd, 1);
-            sprintf(l, "Humd: %6s %%", h_str.c_str());
-            for(int i=0; l[i]&&i<20; i++) lcd_dat(l[i]);
+            sprintf(line, "Humd: %6s %%", h_str.c_str());
         } else {
-            const char* err = "Humd: ---.- %       "; while(*err) lcd_dat(*err++);
+            sprintf(line, "Humd: ---.- %%");
         }
+        lcd_write_line(2, line);
 
-        lcd_cmd(0x80 | 0x54);
-        sprintf(l, "RTC: %s  DHT: %s", current_time.ok?"OK ":"ERR", current_dht.ok?"OK ":"ERR");
-        for(int i=0; l[i]&&i<20; i++) lcd_dat(l[i]);
+        sprintf(line, "RTC: %s  DHT: %s", current_time.ok?"OK ":"ERR", current_dht.ok?"OK ":"ERR");
+        lcd_write_line(3, line);
     }
     if (now - lastDhtUpdate >= 5000) {
         lastDhtUpdate = now;
