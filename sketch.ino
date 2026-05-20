@@ -170,16 +170,22 @@ void dht_set_in()  { GPIOA_CRL &= ~(0xF); GPIOA_CRL |= 0x4; }
 bool dht_read(DhtData* d) {
     uint8_t b[5] = {0};
     dht_set_out(); GPIOA_ODR &= ~1; delay(20); GPIOA_ODR |= 1; delayMicroseconds(40); dht_set_in();
-    uint32_t t = 15000;
-    while ((GPIOA_IDR & 1) && --t); if (!t) return false;
-    t = 15000; while (!(GPIOA_IDR & 1) && --t); if (!t) return false;
-    t = 15000; while ((GPIOA_IDR & 1) && --t); if (!t) return false;
+    
+    unsigned long start = micros();
+    while ((GPIOA_IDR & 1)) if (micros() - start > 100) return false;
+    start = micros();
+    while (!(GPIOA_IDR & 1)) if (micros() - start > 100) return false;
+    start = micros();
+    while ((GPIOA_IDR & 1)) if (micros() - start > 100) return false;
+
     for (int i = 0; i < 40; i++) {
-        t = 15000; while (!(GPIOA_IDR & 1) && --t);
+        start = micros();
+        while (!(GPIOA_IDR & 1)) if (micros() - start > 100) return false;
         delayMicroseconds(35);
         if (GPIOA_IDR & 1) {
             b[i / 8] |= (1 << (7 - (i % 8)));
-            t = 15000; while ((GPIOA_IDR & 1) && --t);
+            start = micros();
+            while ((GPIOA_IDR & 1)) if (micros() - start > 100) return false;
         }
     }
     if (b[4] == ((b[0] + b[1] + b[2] + b[3]) & 0xFF)) {
@@ -202,18 +208,20 @@ void setup() {
 }
 
 void run_fsm() {
-    char line[64];
+    char buf_time[32];
+    char buf_data[32];
+    char line[32];
     switch (fsm_step) {
         case 1: // Task: Read RTC & Serial Log
             ds1307_read(&current_time);
             if (current_time.ok) {
-                sprintf(line, "%04d/%02d/%02d %02d:%02d:%02d", 2000 + current_time.year, current_time.month, current_time.day, current_time.hour, current_time.min, current_time.sec);
-                Serial.print(line);
+                sprintf(buf_time, "%04d/%02d/%02d %02d:%02d:%02d", 2000 + current_time.year, current_time.month, current_time.day, current_time.hour, current_time.min, current_time.sec);
+                Serial.print(buf_time);
             } else Serial.print("----/--/-- --:--:--");
             Serial.print(" | ");
             if (current_dht.ok) {
-                sprintf(line, "%d.%d\xC2\xB0\x43 | %d.%d%%", current_dht.temp10 / 10, abs(current_dht.temp10 % 10), current_dht.humd10 / 10, abs(current_dht.humd10 % 10));
-                Serial.println(line);
+                sprintf(buf_data, "%d.%d\xC2\xB0\x43 | %d.%d%%", current_dht.temp10 / 10, abs(current_dht.temp10 % 10), current_dht.humd10 / 10, abs(current_dht.humd10 % 10));
+                Serial.println(buf_data);
             } else Serial.println("- | -");
             fsm_step++;
             break;
