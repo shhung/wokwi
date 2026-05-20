@@ -1,8 +1,8 @@
 /**
  * worki Project - STM32 Blue Pill (STM32F103C8)
  * 
- * FIX: LCD Ghosting fixed by proper null-check in lcd_write_line.
- * FIX: RTC compatibility enhanced using Stop-Start sequence.
+ * FIX: Hybrid I2C Driver for Simulator Compatibility.
+ * BASE: LCD_STABLE (c92e1e7)
  */
 
 #include <Arduino.h>
@@ -30,31 +30,36 @@ unsigned long lastDhtUpdate = 0;
 uint8_t lcd_addr = 0x27;
 char lcd_buf[4][21] = {"", "", "", ""};
 
-// --- I2C Bus Layer (Conservative Bit-Banging) ---
+// --- I2C Bus Layer (Hybrid Drive Mode) ---
 #define SCL_PIN 6
 #define SDA_PIN 7
 
-#define I2C_DELAY() delayMicroseconds(80)
+#define I2C_DELAY() delayMicroseconds(50)
 
-void sda_high() { GPIOB_BSRR = (1 << SDA_PIN); }
-void sda_low()  { GPIOB_BRR  = (1 << SDA_PIN); }
-void scl_high() { GPIOB_BSRR = (1 << SCL_PIN); }
-void scl_low()  { GPIOB_BRR  = (1 << SCL_PIN); }
+void sda_high() { 
+    GPIOB_CRL &= ~(0xF0000000); 
+    GPIOB_CRL |=  (0x80000000); // Input with Pull
+    GPIOB_ODR |=  (1 << SDA_PIN); 
+}
+void sda_low() { 
+    GPIOB_CRL &= ~(0xF0000000); 
+    GPIOB_CRL |=  (0x30000000); // Output Push-Pull
+    GPIOB_ODR &= ~(1 << SDA_PIN); 
+}
+void scl_high() { 
+    GPIOB_CRL &= ~(0x0F000000); 
+    GPIOB_CRL |=  (0x08000000); // Input with Pull
+    GPIOB_ODR |=  (1 << SCL_PIN); 
+}
+void scl_low() { 
+    GPIOB_CRL &= ~(0x0F000000); 
+    GPIOB_CRL |=  (0x03000000); // Output Push-Pull
+    GPIOB_ODR &= ~(1 << SCL_PIN); 
+}
 bool sda_read() { return (GPIOB_IDR & (1 << SDA_PIN)); }
-bool scl_read() { return (GPIOB_IDR & (1 << SCL_PIN)); }
 
 void i2c_init() {
     RCC_APB2ENR |= (1 << 3) | (1 << 2); 
-    
-    // Forced High Drive (Push-Pull) briefly to "kick" the simulator bus
-    GPIOB_CRL &= ~(0xFF000000);
-    GPIOB_CRL |=  (0x33000000); 
-    GPIOB_BSRR = (1 << 6) | (1 << 7);
-    delay(10);
-    
-    // Switch to Open-Drain for normal I2C
-    GPIOB_CRL &= ~(0xFF000000);
-    GPIOB_CRL |=  (0x55000000); 
     sda_high(); scl_high(); delay(100);
 }
 
@@ -71,23 +76,15 @@ void i2c_stop() {
 }
 
 bool i2c_write(uint8_t data) {
-    bool sda_stuck = false;
     for (int i = 0; i < 8; i++) {
-        if (data & 0x80) {
-            sda_high(); I2C_DELAY();
-            if (!sda_read()) sda_stuck = true;
-        } else {
-            sda_low(); I2C_DELAY();
-        }
+        if (data & 0x80) sda_high(); else sda_low();
+        data <<= 1; I2C_DELAY();
         scl_high(); I2C_DELAY();
         scl_low();  I2C_DELAY();
     }
     sda_high(); I2C_DELAY();
     scl_high(); I2C_DELAY();
     bool ack = !sda_read();
-    if (ack && sda_stuck && (data != 0)) {
-        // This is a fake ACK because SDA was low even when we wanted it high
-    }
     scl_low();  I2C_DELAY();
     return ack;
 }
@@ -138,7 +135,7 @@ bool dht_read_data(DhtData* data) {
     data->ok = false; return false;
 }
 
-// --- LCD Driver ---
+// --- LCD Driver (STABLE VERSION) ---
 #define PIN_RS (1<<0)
 #define PIN_RW (1<<1)
 #define PIN_EN (1<<2)
@@ -188,26 +185,18 @@ void lcd_write_line(int row, const char* txt) {
 // --- RTC Driver ---
 uint8_t b2d(uint8_t v) { return ((v / 16 * 10) + (v % 16)); }
 void ds1307_init() {
-    Serial.print("Checking Bus... SDA="); Serial.print(sda_read());
-    Serial.print(" SCL="); Serial.println(scl_read());
-    
     i2c_start();
     if (i2c_write(0x68 << 1)) {
-        Serial.println("RTC ACK received");
         i2c_write(0x00); 
-        i2c_stop(); delayMicroseconds(200); i2c_start(); 
+        i2c_stop(); delayMicroseconds(100); i2c_start(); 
         i2c_write((0x68 << 1) | 1);
         uint8_t s = i2c_read(false); i2c_stop();
-        Serial.print("RTC CH bit: "); Serial.println(s, HEX);
         if (s & 0x80) {
-            Serial.println("Starting RTC...");
             i2c_start(); i2c_write(0x68 << 1); i2c_write(0x00); 
             i2c_write(0x00); i2c_write(0x00); i2c_write(0x12); 
             i2c_write(0x01); i2c_write(0x19); i2c_write(0x05); i2c_write(0x26); 
             i2c_stop();
         }
-    } else {
-        Serial.println("RTC NACK!");
     }
 }
 
@@ -215,7 +204,7 @@ void ds1307_read(RtcTime* t) {
     i2c_start();
     if (!i2c_write(0x68 << 1)) { i2c_stop(); t->ok = false; return; }
     i2c_write(0x00); 
-    i2c_stop(); delayMicroseconds(50); i2c_start(); // Stop + Start sequence
+    i2c_stop(); delayMicroseconds(50); i2c_start(); 
     if (!i2c_write((0x68 << 1) | 1)) { i2c_stop(); t->ok = false; return; }
     uint8_t raw[7];
     for(int i=0; i<6; i++) raw[i] = i2c_read(true);
@@ -225,9 +214,6 @@ void ds1307_read(RtcTime* t) {
     t->day=b2d(raw[4]); t->month=b2d(raw[5]); t->year=b2d(raw[6]);
     if (t->month == 0 || t->month > 12 || t->day == 0 || t->day > 31) {
         t->ok = false;
-        Serial.print("RTC DATA ERR: "); 
-        for(int i=0; i<7; i++) { Serial.print(raw[i], HEX); Serial.print(" "); }
-        Serial.println();
     } else {
         t->ok = true;
     }
@@ -236,19 +222,6 @@ void ds1307_read(RtcTime* t) {
 void setup() {
     Serial.begin(115200); delay(1000);
     i2c_init();
-
-    Serial.println("Targeted Scan (0x27, 0x3F, 0x68):");
-    uint8_t targets[] = {0x27, 0x3F, 0x68};
-    for(int i=0; i<3; i++) {
-        i2c_start();
-        if (i2c_write(targets[i] << 1)) {
-            Serial.print("Found Device at 0x"); Serial.println(targets[i], HEX);
-        } else {
-            Serial.print("No Device at 0x"); Serial.println(targets[i], HEX);
-        }
-        i2c_stop();
-    }
-
     lcd_addr = 0x27;
     i2c_start();
     if (!i2c_write(0x27 << 1)) { i2c_stop(); i2c_start(); if (i2c_write(0x3F << 1)) lcd_addr = 0x3F; }
