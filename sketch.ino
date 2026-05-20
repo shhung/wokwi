@@ -1,6 +1,7 @@
 /**
  * worki Project - STM32 Blue Pill (STM32F103C8)
  * 
+ * NOTE: LCD Driver in this version is noted as "Most Stable".
  * Features:
  * - Conservative Bit-Banging I2C (SCL: PB6, SDA: PB7)
  * - Custom 1-Wire DHT22 (PA0)
@@ -35,7 +36,6 @@ char lcd_buf[4][21] = {"", "", "", ""};
 #define SCL_PIN 6
 #define SDA_PIN 7
 
-// Increased delay for maximum stability (Approx 12.5kHz)
 #define I2C_DELAY() delayMicroseconds(40)
 
 void sda_high() { GPIOB_BSRR = (1 << SDA_PIN); }
@@ -48,17 +48,18 @@ void i2c_init() {
     RCC_APB2ENR |= (1 << 3) | (1 << 2); 
     GPIOB_CRL &= ~(0xFF000000);
     GPIOB_CRL |=  (0x55000000); 
-    sda_high(); scl_high();
+    // Force Bus Idle
+    sda_high(); scl_high(); delay(10);
     // Bus Recovery: Clock out any hung slave
     for(int i=0; i<10; i++) {
         scl_low(); I2C_DELAY(); scl_high(); I2C_DELAY();
+        if (sda_read()) break; 
     }
-    delay(100);
+    sda_low(); I2C_DELAY(); sda_high(); delay(50);
 }
 
 void i2c_start() {
-    sda_high(); I2C_DELAY();
-    scl_high(); I2C_DELAY();
+    sda_high(); scl_high(); I2C_DELAY();
     sda_low();  I2C_DELAY();
     scl_low();  I2C_DELAY();
 }
@@ -128,7 +129,7 @@ bool dht_read_data(DhtData* data) {
     data->ok = false; return false;
 }
 
-// --- LCD Driver (Rollback to Safe Version) ---
+// --- LCD Driver (Most Stable Version) ---
 #define PIN_RS (1<<0)
 #define PIN_RW (1<<1)
 #define PIN_EN (1<<2)
@@ -183,7 +184,7 @@ void ds1307_init() {
     if (i2c_write(0x68 << 1)) {
         i2c_write(0x00); i2c_start(); i2c_write((0x68 << 1) | 1);
         uint8_t s = i2c_read(false); i2c_stop();
-        if ((s & 0x80) || (s == 0xFF)) {
+        if (s & 0x80) {
             i2c_start(); i2c_write(0x68 << 1); i2c_write(0x00); 
             i2c_write(0x00); i2c_write(0x00); i2c_write(0x12); 
             i2c_write(0x01); i2c_write(0x19); i2c_write(0x05); i2c_write(0x26); 
@@ -258,21 +259,21 @@ void loop() {
         
         if (current_dht.ok) {
             String t_str = String(current_dht.temp, 1);
-            sprintf(line, "Temp: %6s \xDF\x43", t_str.c_str());
+            sprintf(line, "Temp: %s\xDF\x43", t_str.c_str());
         } else {
-            sprintf(line, "Temp: ---.- \xDF\x43");
+            sprintf(line, "Temp: ---.-\xDF\x43");
         }
         lcd_write_line(1, line);
 
         if (current_dht.ok) {
             String h_str = String(current_dht.humd, 1);
-            sprintf(line, "Humd: %6s %%", h_str.c_str());
+            sprintf(line, "Humd: %s%%", h_str.c_str());
         } else {
-            sprintf(line, "Humd: ---.- %%");
+            sprintf(line, "Humd: ---.-%%");
         }
         lcd_write_line(2, line);
 
-        sprintf(line, "RTC: %s  DHT: %s", current_time.ok?"OK ":"ERR", current_dht.ok?"OK ":"ERR");
+        sprintf(line, "RTC: %-4s  DHT: %-4s", current_time.ok?"OK":"ERR", current_dht.ok?"OK":"ERR");
         lcd_write_line(3, line);
     }
     if (now - lastDhtUpdate >= 5000) {
