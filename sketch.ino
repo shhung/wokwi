@@ -214,7 +214,7 @@ void run_fsm() {
         case 1: // Task: Read RTC & Serial Log
             ds1307_read(&current_time);
             if (current_time.ok && current_dht.ok) {
-                sprintf(fsm_buf, "%04d/%02d/%02d %02d:%02d:%02d | %d.%d C | %d.%d%%", 2000 + current_time.year, current_time.month, current_time.day, current_time.hour, current_time.min, current_time.sec, current_dht.temp10 / 10, abs(current_dht.temp10 % 10), current_dht.humd10 / 10, abs(current_dht.humd10 % 10));
+                sprintf(fsm_buf, "%04d/%02d/%02d %02d:%02d:%02d | %d.%d\xC2\xB0\x43 | %d.%d%%", 2000 + current_time.year, current_time.month, current_time.day, current_time.hour, current_time.min, current_time.sec, current_dht.temp10 / 10, abs(current_dht.temp10 % 10), current_dht.humd10 / 10, abs(current_dht.humd10 % 10));
                 Serial.println(fsm_buf);
             } else if (current_time.ok) {
                 sprintf(fsm_buf, "%04d/%02d/%02d %02d:%02d:%02d | - | -", 2000 + current_time.year, current_time.month, current_time.day, current_time.hour, current_time.min, current_time.sec);
