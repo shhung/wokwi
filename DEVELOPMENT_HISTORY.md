@@ -450,3 +450,21 @@
 - 移除所有除錯用的 Serial 日誌，恢復為標準的系統 Log 格式。
 
 ---
+
+## 2026-05-19: 專案里程碑：發布 RELEASE_V1.0
+
+### 使用者需求 (Prompt)
+- 目前正常了，先打上 tag push 到 remote，後續再繼續驗證。
+
+### 關鍵決策
+- **版本標記**：將當前穩定整合版本標記為 `RELEASE_V1.0`。該版本包含穩定的 LCD 驅動與修復後的 Hybrid I2C 驅動。
+- **同步遠端**：完成本地 Commit 後，將 `main` 分支與所有標籤 (`LCD_STABLE`, `RELEASE_V1.0`) 推送至遠端 GitHub 倉庫。
+- **環境清理**：保留 `rtc_debug.ino` 作為未來可能的診斷工具。
+
+### 目前狀態
+- RTC: OK (Hybrid Drive + Stop-Start sequence)
+- LCD: OK (Stable base, no ghosting)
+- DHT22: OK
+- Remote: Updated
+
+---
