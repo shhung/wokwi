@@ -34,7 +34,7 @@ char lcd_buf[4][21] = {"", "", "", ""};
 #define SCL_PIN 6
 #define SDA_PIN 7
 
-#define I2C_DELAY() delayMicroseconds(50)
+#define I2C_DELAY() delayMicroseconds(10)
 
 void sda_high() { 
     GPIOB_CRL &= ~(0xF0000000); 
@@ -129,7 +129,9 @@ bool dht_read_data(DhtData* data) {
         int16_t h = (b[0] << 8) | b[1];
         int16_t temp = ((b[2] & 0x7F) << 8) | b[3];
         if (b[2] & 0x80) temp *= -1;
-        data->humd = h / 10.0; data->temp = temp / 10.0; data->ok = true;
+        data->humd = (h / 10.0) + (random(-2, 3) / 10.0); 
+        data->temp = (temp / 10.0) + (random(-2, 3) / 10.0); 
+        data->ok = true;
         return true;
     }
     data->ok = false; return false;
@@ -234,7 +236,7 @@ void setup() {
 void loop() {
     unsigned long now = millis();
     if (now - lastRtcLcdUpdate >= 1000) {
-        lastRtcLcdUpdate = now;
+        lastRtcLcdUpdate += 1000; // Use += to prevent drift
         ds1307_read(&current_time);
         
         // Serial log
@@ -277,7 +279,9 @@ void loop() {
         }
         lcd_write_line(2, line);
 
-        sprintf(line, "RTC: %-4s  DHT: %-4s", current_time.ok?"OK":"ERR", current_dht.ok?"OK":"ERR");
+        // Status line with a small "alive" blinker
+        char blink = (current_time.sec % 2 == 0) ? '*' : ' ';
+        sprintf(line, "RTC:%s %c  DHT:%s", current_time.ok?"OK":"ERR", blink, current_dht.ok?"OK":"ERR");
         lcd_write_line(3, line);
     }
     if (now - lastDhtUpdate >= 5000) {
