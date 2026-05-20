@@ -10,11 +10,29 @@
 - 須自行實做 bus driver（I2C、1-Wire）及 device driver
 
  LCD 輸出格式
-```
+```bash
+# 正常時
 Line 1:  HH:MM:SS  YYYY/MM/DD
 Line 2:  Temp: XXX.X⁰C
 Line 3:  Humd: XXX.X%
 Line 4:  RTC: OK   DHT: OK
+# LCD 異常時
+# RTC異常
+# 時間：--:--:--
+# 日期：----/--/--
+# 狀態：RTC: ERR
+Line 1:  --:--:--  ----/--/--
+Line 2:  Temp: XXX.X⁰C
+Line 3:  Humd: XXX.X%
+Line 4:  RTC: ERR   DHT: OK
+# DHT22異常
+# 溫度：---.-
+# 濕度：---.-
+# 狀態：DHT: ERR
+Line 1:  HH:MM:SS  YYYY/MM/DD
+Line 2:  Temp: ---.-⁰C
+Line 3:  Humd: ---.-%
+Line 4:  RTC: OK   DHT: ERR
 ```
 狀態列即時反映模組連線狀態
 
@@ -22,14 +40,8 @@ Line 4:  RTC: OK   DHT: OK
 # Serial 輸出格式
 # 正常
 YYYY/MM/DD HH:MM:SS | XXX.X⁰C | XXX.X%
-# RTC異常
-時間：--:--:--
-日期：----/--/--
-狀態：RTC: ERR
-# DHT22異常
-溫度：---.-
-濕度：---.-
-狀態：DHT: ERR
+# 讀取失敗的裝置對應數字均顯示「-」
+----/--/-- --:--:-- | XXX.X⁰C | 45.9%
 ```
 
 周邊配置如下  
