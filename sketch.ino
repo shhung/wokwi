@@ -1,8 +1,8 @@
 /**
  * worki Project - STM32 Blue Pill (STM32F103C8)
  * 
- * VERSION: STABLE_FSM_V1
- * FIX: Task Decoupling, I2C Timeout, and Bus Recovery.
+ * VERSION: STABLE_FSM_V2
+ * FIX: Interspaced FSM, Conservative Timings, and Buffer Safety.
  */
 
 #include <Arduino.h>
@@ -18,21 +18,22 @@
 
 // --- Data Structures ---
 struct RtcTime { uint8_t year, month, day, hour, min, sec; bool ok; };
-struct DhtData { int16_t temp10, humd10; bool ok; }; // Values multiplied by 10
+struct DhtData { int16_t temp10, humd10; bool ok; };
 
 // --- Global Variables ---
 RtcTime current_time = {0, 0, 0, 0, 0, 0, false};
 DhtData current_dht = {0, 0, false};
 unsigned long last1sTask = 0;
 unsigned long last5sTask = 0;
+unsigned long lastFsmStep = 0;
 uint8_t lcd_addr = 0x27;
 char lcd_buf[4][21] = {"", "", "", ""};
 int fsm_step = 0;
 
-// --- I2C Bus Layer (Hybrid with Timeout) ---
+// --- I2C Bus Layer (Conservative 50us) ---
 #define SCL_PIN 6
 #define SDA_PIN 7
-#define I2C_DELAY() delayMicroseconds(20)
+#define I2C_DELAY() delayMicroseconds(50)
 
 void sda_high() { 
     GPIOB_CRL &= ~(0xF0000000); GPIOB_CRL |= (0x80000000); 
@@ -112,12 +113,12 @@ void pcf_write(uint8_t d) {
     i2c_start(); 
     if (i2c_write(lcd_addr << 1)) i2c_write(d | PIN_BL); 
     i2c_stop(); 
-    delayMicroseconds(40);
+    delayMicroseconds(100);
 }
 
 void lcd_pulse(uint8_t d) {
-    pcf_write(d | PIN_EN); delayMicroseconds(60);
-    pcf_write(d & ~PIN_EN); delayMicroseconds(60);
+    pcf_write(d | PIN_EN); delayMicroseconds(150);
+    pcf_write(d & ~PIN_EN); delayMicroseconds(150);
 }
 
 void lcd_send_4(uint8_t n, uint8_t m) {
@@ -126,14 +127,14 @@ void lcd_send_4(uint8_t n, uint8_t m) {
 }
 
 void lcd_send(uint8_t v, uint8_t m) { lcd_send_4(v >> 4, m); lcd_send_4(v & 0x0F, m); }
-void lcd_cmd(uint8_t c) { lcd_send(c, 0); delayMicroseconds(100); }
+void lcd_cmd(uint8_t c) { lcd_send(c, 0); delayMicroseconds(200); }
 void lcd_dat(uint8_t d) { lcd_send(d, PIN_RS); }
 
 void lcd_init() {
-    delay(200);
-    lcd_send_4(0x03, 0); delay(5); lcd_send_4(0x03, 0); delay(5); lcd_send_4(0x03, 0); delay(5);
+    delay(500);
+    lcd_send_4(0x03, 0); delay(10); lcd_send_4(0x03, 0); delay(5); lcd_send_4(0x03, 0); delay(5);
     lcd_send_4(0x02, 0); delay(5);
-    lcd_cmd(0x28); lcd_cmd(0x0C); lcd_cmd(0x06); lcd_cmd(0x01); delay(10);
+    lcd_cmd(0x28); lcd_cmd(0x0C); lcd_cmd(0x06); lcd_cmd(0x01); delay(20);
 }
 
 void lcd_write_line(int row, const char* txt) {
@@ -153,7 +154,7 @@ uint8_t b2d(uint8_t v) { return ((v / 16 * 10) + (v % 16)); }
 void ds1307_read(RtcTime* t) {
     i2c_start();
     if (!i2c_write(0x68 << 1)) { i2c_stop(); t->ok = false; return; }
-    i2c_write(0x00); i2c_stop(); delayMicroseconds(50); i2c_start();
+    i2c_write(0x00); i2c_stop(); delayMicroseconds(100); i2c_start();
     if (!i2c_write((0x68 << 1) | 1)) { i2c_stop(); t->ok = false; return; }
     uint8_t r[7];
     for (int i = 0; i < 6; i++) r[i] = i2c_read(true);
@@ -169,16 +170,16 @@ void dht_set_in()  { GPIOA_CRL &= ~(0xF); GPIOA_CRL |= 0x4; }
 bool dht_read(DhtData* d) {
     uint8_t b[5] = {0};
     dht_set_out(); GPIOA_ODR &= ~1; delay(20); GPIOA_ODR |= 1; delayMicroseconds(40); dht_set_in();
-    uint32_t t = 10000;
+    uint32_t t = 15000;
     while ((GPIOA_IDR & 1) && --t); if (!t) return false;
-    t = 10000; while (!(GPIOA_IDR & 1) && --t); if (!t) return false;
-    t = 10000; while ((GPIOA_IDR & 1) && --t); if (!t) return false;
+    t = 15000; while (!(GPIOA_IDR & 1) && --t); if (!t) return false;
+    t = 15000; while ((GPIOA_IDR & 1) && --t); if (!t) return false;
     for (int i = 0; i < 40; i++) {
-        t = 10000; while (!(GPIOA_IDR & 1) && --t);
+        t = 15000; while (!(GPIOA_IDR & 1) && --t);
         delayMicroseconds(35);
         if (GPIOA_IDR & 1) {
             b[i / 8] |= (1 << (7 - (i % 8)));
-            t = 10000; while ((GPIOA_IDR & 1) && --t);
+            t = 15000; while ((GPIOA_IDR & 1) && --t);
         }
     }
     if (b[4] == ((b[0] + b[1] + b[2] + b[3]) & 0xFF)) {
@@ -195,11 +196,13 @@ void setup() {
     Serial.begin(115200); delay(1000);
     i2c_init();
     lcd_init();
+    last1sTask = millis();
+    last5sTask = millis();
     Serial.println("System Ready");
 }
 
 void run_fsm() {
-    char line[21];
+    char line[64];
     switch (fsm_step) {
         case 1: // Task: Read RTC & Serial Log
             ds1307_read(&current_time);
@@ -235,7 +238,7 @@ void run_fsm() {
         case 5: // LCD Line 3
             sprintf(line, "RTC: %-4s  DHT: %-4s", current_time.ok ? "OK" : "ERR", current_dht.ok ? "OK" : "ERR");
             lcd_write_line(3, line);
-            fsm_step = 0; // End of 1s task chain
+            fsm_step = 0;
             break;
         case 6: // Task: Read DHT
             dht_read(&current_dht);
@@ -247,17 +250,23 @@ void run_fsm() {
 void loop() {
     unsigned long now = millis();
     
-    // Task Scheduling
     if (fsm_step == 0) {
         if (now - last1sTask >= 1000) {
-            last1sTask = now;
-            fsm_step = 1; // Start RTC/LCD chain
+            last1sTask += 1000;
+            if (now - last1sTask > 1000) last1sTask = now; // Prevent catch-up spiral
+            fsm_step = 1;
+            lastFsmStep = now;
         } else if (now - last5sTask >= 5000) {
-            last5sTask = now;
-            fsm_step = 6; // Start DHT read
+            last5sTask += 5000;
+            if (now - last5sTask > 5000) last5sTask = now;
+            fsm_step = 6;
+            lastFsmStep = now;
+        }
+    } else {
+        // Execute one state every 100ms to spread the I2C load
+        if (now - lastFsmStep >= 100) {
+            lastFsmStep = now;
+            run_fsm();
         }
     }
-    
-    // Execute FSM Step (Non-blocking)
-    if (fsm_step > 0) run_fsm();
 }
