@@ -1,22 +1,24 @@
 /**
  * worki Project - STM32 Blue Pill (STM32F103C8)
  * 
- * FIX: LCD Ghosting fixed by proper null-check in lcd_write_line.
- * FIX: RTC compatibility enhanced using Stop-Start sequence.
+ * DIAGNOSTIC VERSION:
+ * - Forced Bus Recovery (Push-Pull Kick)
+ * - I2C Address Scanner
+ * - Full LCD Refresh (No Buffer Comparison)
  */
 
 #include <Arduino.h>
 
 // --- Register Definitions ---
 #define RCC_APB2ENR    (*((volatile uint32_t *)0x40021018))
+#define RCC_APB1ENR    (*((volatile uint32_t *)0x4002101C))
+#define GPIOB_CRL      (*((volatile uint32_t *)0x40010C00))
+#define GPIOB_IDR      (*((volatile uint32_t *)0x40010C08))
+#define GPIOB_BSRR     (*((volatile uint32_t *)0x40010C10))
+#define GPIOB_BRR      (*((volatile uint32_t *)0x40010C14))
 #define GPIOA_CRL      (*((volatile uint32_t *)0x40010800))
 #define GPIOA_ODR      (*((volatile uint32_t *)0x4001080C))
 #define GPIOA_IDR      (*((volatile uint32_t *)0x40010808))
-#define GPIOB_CRL      (*((volatile uint32_t *)0x40010C00))
-#define GPIOB_IDR      (*((volatile uint32_t *)0x40010C08))
-#define GPIOB_ODR      (*((volatile uint32_t *)0x40010C0C))
-#define GPIOB_BSRR     (*((volatile uint32_t *)0x40010C10))
-#define GPIOB_BRR      (*((volatile uint32_t *)0x40010C14))
 
 // --- Data Structures ---
 struct RtcTime { uint8_t year, month, day, hour, min, sec; bool ok; };
@@ -28,12 +30,10 @@ DhtData current_dht = {0.0f, 0.0f, false};
 unsigned long lastRtcLcdUpdate = 0;
 unsigned long lastDhtUpdate = 0;
 uint8_t lcd_addr = 0x27;
-char lcd_buf[4][21] = {"", "", "", ""};
 
-// --- I2C Bus Layer (Conservative Bit-Banging) ---
+// --- I2C Bus Layer (Aggressive Recovery) ---
 #define SCL_PIN 6
 #define SDA_PIN 7
-
 #define I2C_DELAY() delayMicroseconds(40)
 
 void sda_high() { GPIOB_BSRR = (1 << SDA_PIN); }
@@ -44,18 +44,30 @@ bool sda_read() { return (GPIOB_IDR & (1 << SDA_PIN)); }
 bool scl_read() { return (GPIOB_IDR & (1 << SCL_PIN)); }
 
 void i2c_init() {
-    RCC_APB2ENR |= (1 << 3) | (1 << 2); 
+    // 1. Enable Clocks (GPIOB + AFIO)
+    RCC_APB2ENR |= (1 << 3) | (1 << 0);
+    // 2. Explicitly disable Hardware I2C1 to avoid interference
+    RCC_APB1ENR |= (1 << 21); // Power it up briefly to reset
+    *((volatile uint32_t *)0x40005400) = 0x8000; // I2C1_CR1 SWRST
+    delay(10);
+    *((volatile uint32_t *)0x40005400) = 0;      // Release Reset
+    RCC_APB1ENR &= ~(1 << 21); // Disable Clock
+
+    // 3. Forced Bus Kick: Temporary Push-Pull to drive lines high
     GPIOB_CRL &= ~(0xFF000000);
-    GPIOB_CRL |=  (0x55000000); 
-    sda_high(); scl_high(); delay(10);
-    if (!sda_read() || !scl_read()) {
-        Serial.print("I2C BUS STUCK: SDA="); Serial.print(sda_read());
-        Serial.print(" SCL="); Serial.println(scl_read());
-    }
-    for(int i=0; i<10; i++) {
+    GPIOB_CRL |=  (0x33000000); // Output Push-Pull 50MHz
+    sda_high(); scl_high(); delay(20);
+    
+    // 4. Switch to proper I2C mode: Open-Drain
+    GPIOB_CRL &= ~(0xFF000000);
+    GPIOB_CRL |=  (0x55000000); // Output Open-Drain 10MHz
+    sda_high(); scl_high(); delay(20);
+
+    // 5. Clock out any stuck slaves
+    for(int i=0; i<16; i++) {
         scl_low(); I2C_DELAY(); scl_high(); I2C_DELAY();
     }
-    sda_low(); I2C_DELAY(); sda_high(); delay(50);
+    i2c_stop(); delay(50);
 }
 
 void i2c_start() {
@@ -89,7 +101,7 @@ uint8_t i2c_read(bool ack) {
     sda_high(); I2C_DELAY();
     for (int i = 0; i < 8; i++) {
         scl_high(); I2C_DELAY();
-        I2C_DELAY(); 
+        I2C_DELAY();
         if (sda_read()) data |= (1 << (7 - i));
         scl_low();  I2C_DELAY();
     }
@@ -140,12 +152,12 @@ void pcf_write(uint8_t d) {
     i2c_start(); 
     if (i2c_write(lcd_addr << 1)) i2c_write(d | PIN_BL); 
     i2c_stop(); 
-    delayMicroseconds(100); 
+    delayMicroseconds(150); 
 }
 
 void lcd_pulse(uint8_t d) {
-    pcf_write(d | PIN_EN); delayMicroseconds(50);
-    pcf_write(d & ~PIN_EN); delayMicroseconds(50);
+    pcf_write(d | PIN_EN); delayMicroseconds(60);
+    pcf_write(d & ~PIN_EN); delayMicroseconds(60);
 }
 
 void lcd_send_4(uint8_t n, uint8_t m) {
@@ -154,25 +166,22 @@ void lcd_send_4(uint8_t n, uint8_t m) {
 }
 
 void lcd_send(uint8_t v, uint8_t m)   { lcd_send_4(v>>4, m); lcd_send_4(v&0x0F, m); }
-void lcd_cmd(uint8_t c) { lcd_send(c, 0); delayMicroseconds(100); }
+void lcd_cmd(uint8_t c) { lcd_send(c, 0); delayMicroseconds(150); }
 void lcd_dat(uint8_t d) { lcd_send(d, PIN_RS); }
 
 void lcd_init() {
-    delay(200);
+    delay(250);
     lcd_send_4(0x03, 0); delay(10); lcd_send_4(0x03, 0); delay(5); lcd_send_4(0x03, 0); delay(5);
     lcd_send_4(0x02, 0); delay(5);
-    lcd_cmd(0x28); lcd_cmd(0x0C); lcd_cmd(0x06); lcd_cmd(0x01); delay(10);
+    lcd_cmd(0x28); lcd_cmd(0x0C); lcd_cmd(0x06); lcd_cmd(0x01); delay(20);
 }
 
 void lcd_write_line(int row, const char* txt) {
-    if (strcmp(lcd_buf[row], txt) == 0) return;
-    strncpy(lcd_buf[row], txt, 20);
-    lcd_buf[row][20] = '\0';
     uint8_t pos[] = {0x00, 0x40, 0x14, 0x54};
     lcd_cmd(0x80 | pos[row]);
     bool reached_end = false;
     for (int i = 0; i < 20; i++) {
-        if (!reached_end && txt[i] == '\0') reached_end = true;
+        if (!reached_end && (txt[i] == '\0')) reached_end = true;
         if (!reached_end) lcd_dat(txt[i]); else lcd_dat(' ');
     }
 }
@@ -183,7 +192,7 @@ void ds1307_init() {
     i2c_start();
     if (i2c_write(0x68 << 1)) {
         i2c_write(0x00); 
-        i2c_stop(); delayMicroseconds(100); i2c_start(); // Stop + Start for compatibility
+        i2c_stop(); delayMicroseconds(100); i2c_start(); 
         i2c_write((0x68 << 1) | 1);
         uint8_t s = i2c_read(false); i2c_stop();
         if (s & 0x80) {
@@ -199,7 +208,7 @@ void ds1307_read(RtcTime* t) {
     i2c_start();
     if (!i2c_write(0x68 << 1)) { i2c_stop(); t->ok = false; return; }
     i2c_write(0x00); 
-    i2c_stop(); delayMicroseconds(50); i2c_start(); // Stop + Start sequence
+    i2c_stop(); delayMicroseconds(100); i2c_start();
     if (!i2c_write((0x68 << 1) | 1)) { i2c_stop(); t->ok = false; return; }
     uint8_t raw[7];
     for(int i=0; i<6; i++) raw[i] = i2c_read(true);
@@ -207,23 +216,30 @@ void ds1307_read(RtcTime* t) {
     i2c_stop();
     t->sec=b2d(raw[0]&0x7F); t->min=b2d(raw[1]); t->hour=b2d(raw[2]&0x3F);
     t->day=b2d(raw[4]); t->month=b2d(raw[5]); t->year=b2d(raw[6]);
-    if (t->month == 0 || t->month > 12 || t->day == 0 || t->day > 31) {
-        t->ok = false;
+    if (t->month == 0 || t->month > 12) t->ok = false; else t->ok = true;
+    if (!t->ok) {
         Serial.print("RTC DATA ERR: "); 
         for(int i=0; i<7; i++) { Serial.print(raw[i], HEX); Serial.print(" "); }
         Serial.println();
-    } else {
-        t->ok = true;
     }
 }
 
 void setup() {
     Serial.begin(115200); delay(1000);
     i2c_init();
+    
+    Serial.println("I2C Scanner:");
+    for(int a=1; a<127; a++) {
+        i2c_start();
+        if (i2c_write(a << 1)) { Serial.print("Found: 0x"); Serial.println(a, HEX); }
+        i2c_stop();
+    }
+
     lcd_addr = 0x27;
     i2c_start();
     if (!i2c_write(0x27 << 1)) { i2c_stop(); i2c_start(); if (i2c_write(0x3F << 1)) lcd_addr = 0x3F; }
     i2c_stop();
+    
     ds1307_init();
     lcd_init();
     Serial.println("System Ready");
