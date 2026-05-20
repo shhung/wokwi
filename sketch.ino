@@ -189,10 +189,10 @@ bool dht_read(DhtData* d) {
         }
     }
     if (b[4] == ((b[0] + b[1] + b[2] + b[3]) & 0xFF)) {
-        d->humd10 = ((b[0] << 8) | b[1]) + random(-2, 3);
+        d->humd10 = ((b[0] << 8) | b[1]);
         int16_t temp = ((b[2] & 0x7F) << 8) | b[3];
         if (b[2] & 0x80) temp = -temp;
-        d->temp10 = temp + random(-2, 3);
+        d->temp10 = temp;
         d->ok = true; return true;
     }
     d->ok = false; return false;
@@ -208,44 +208,42 @@ void setup() {
 }
 
 void run_fsm() {
-    char buf_time[32];
-    char buf_data[32];
-    char line[32];
+    static char fsm_buf[64];
     switch (fsm_step) {
         case 1: // Task: Read RTC & Serial Log
             ds1307_read(&current_time);
-            if (current_time.ok) {
-                sprintf(buf_time, "%04d/%02d/%02d %02d:%02d:%02d", 2000 + current_time.year, current_time.month, current_time.day, current_time.hour, current_time.min, current_time.sec);
-                Serial.print(buf_time);
-            } else Serial.print("----/--/-- --:--:--");
-            Serial.print(" | ");
-            if (current_dht.ok) {
-                sprintf(buf_data, "%d.%d\xC2\xB0\x43 | %d.%d%%", current_dht.temp10 / 10, abs(current_dht.temp10 % 10), current_dht.humd10 / 10, abs(current_dht.humd10 % 10));
-                Serial.println(buf_data);
-            } else Serial.println("- | -");
+            if (current_time.ok && current_dht.ok) {
+                sprintf(fsm_buf, "%04d/%02d/%02d %02d:%02d:%02d | %d.%d C | %d.%d%%", 2000 + current_time.year, current_time.month, current_time.day, current_time.hour, current_time.min, current_time.sec, current_dht.temp10 / 10, abs(current_dht.temp10 % 10), current_dht.humd10 / 10, abs(current_dht.humd10 % 10));
+                Serial.println(fsm_buf);
+            } else if (current_time.ok) {
+                sprintf(fsm_buf, "%04d/%02d/%02d %02d:%02d:%02d | - | -", 2000 + current_time.year, current_time.month, current_time.day, current_time.hour, current_time.min, current_time.sec);
+                Serial.println(fsm_buf);
+            } else {
+                Serial.println("----/--/-- --:--:-- | - | -");
+            }
             fsm_step++;
             break;
         case 2: // LCD Line 0
-            if (current_time.ok) sprintf(line, "%02d:%02d:%02d  %04d/%02d/%02d", current_time.hour, current_time.min, current_time.sec, 2000 + current_time.year, current_time.month, current_time.day);
-            else sprintf(line, "--:--:--  ----/--/--");
-            lcd_write_line(0, line);
+            if (current_time.ok) sprintf(fsm_buf, "%02d:%02d:%02d  %04d/%02d/%02d", current_time.hour, current_time.min, current_time.sec, 2000 + current_time.year, current_time.month, current_time.day);
+            else sprintf(fsm_buf, "--:--:--  ----/--/--");
+            lcd_write_line(0, fsm_buf);
             fsm_step++;
             break;
         case 3: // LCD Line 1
-            if (current_dht.ok) sprintf(line, "Temp: %d.%d\xDF\x43", current_dht.temp10 / 10, abs(current_dht.temp10 % 10));
-            else sprintf(line, "Temp: ---.-\xDF\x43");
-            lcd_write_line(1, line);
+            if (current_dht.ok) sprintf(fsm_buf, "Temp: %d.%d\xDF\x43", current_dht.temp10 / 10, abs(current_dht.temp10 % 10));
+            else sprintf(fsm_buf, "Temp: ---.-\xDF\x43");
+            lcd_write_line(1, fsm_buf);
             fsm_step++;
             break;
         case 4: // LCD Line 2
-            if (current_dht.ok) sprintf(line, "Humd: %d.%d%%", current_dht.humd10 / 10, abs(current_dht.humd10 % 10));
-            else sprintf(line, "Humd: ---.-%%");
-            lcd_write_line(2, line);
+            if (current_dht.ok) sprintf(fsm_buf, "Humd: %d.%d%%", current_dht.humd10 / 10, abs(current_dht.humd10 % 10));
+            else sprintf(fsm_buf, "Humd: ---.-%%");
+            lcd_write_line(2, fsm_buf);
             fsm_step++;
             break;
         case 5: // LCD Line 3
-            sprintf(line, "RTC: %-4s  DHT: %-4s", current_time.ok ? "OK" : "ERR", current_dht.ok ? "OK" : "ERR");
-            lcd_write_line(3, line);
+            sprintf(fsm_buf, "RTC: %-4s  DHT: %-4s", current_time.ok ? "OK" : "ERR", current_dht.ok ? "OK" : "ERR");
+            lcd_write_line(3, fsm_buf);
             fsm_step = 0;
             break;
         case 6: // Task: Read DHT
