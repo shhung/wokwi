@@ -34,7 +34,7 @@ char lcd_buf[4][21] = {"", "", "", ""};
 #define SCL_PIN 6
 #define SDA_PIN 7
 
-#define I2C_DELAY() delayMicroseconds(10)
+#define I2C_DELAY() delayMicroseconds(25)
 
 void sda_high() { 
     GPIOB_CRL &= ~(0xF0000000); 
@@ -147,12 +147,12 @@ void pcf_write(uint8_t d) {
     i2c_start(); 
     if (i2c_write(lcd_addr << 1)) i2c_write(d | PIN_BL); 
     i2c_stop(); 
-    delayMicroseconds(100); 
+    delayMicroseconds(50); 
 }
 
 void lcd_pulse(uint8_t d) {
-    pcf_write(d | PIN_EN); delayMicroseconds(50);
-    pcf_write(d & ~PIN_EN); delayMicroseconds(50);
+    pcf_write(d | PIN_EN); delayMicroseconds(100);
+    pcf_write(d & ~PIN_EN); delayMicroseconds(100);
 }
 
 void lcd_send_4(uint8_t n, uint8_t m) {
@@ -236,7 +236,9 @@ void setup() {
 void loop() {
     unsigned long now = millis();
     if (now - lastRtcLcdUpdate >= 1000) {
-        lastRtcLcdUpdate += 1000; // Use += to prevent drift
+        if (now - lastRtcLcdUpdate > 2000) lastRtcLcdUpdate = now;
+        else lastRtcLcdUpdate += 1000;
+
         ds1307_read(&current_time);
         
         // Serial log
@@ -249,8 +251,13 @@ void loop() {
         }
         Serial.print(" | ");
         if (current_dht.ok) { 
-            Serial.print(current_dht.temp, 1); Serial.print("\xC2\xB0\x43 | "); 
-            Serial.print(current_dht.humd, 1); Serial.println("%"); 
+            int t_i = (int)current_dht.temp;
+            int t_d = (int)(abs(current_dht.temp - t_i) * 10);
+            int h_i = (int)current_dht.humd;
+            int h_d = (int)(abs(current_dht.humd - h_i) * 10);
+            char buf[32];
+            sprintf(buf, "%d.%d\xC2\xB0\x43 | %d.%d%%", t_i, t_d, h_i, h_d);
+            Serial.println(buf);
         } else { 
             Serial.println("- | -"); 
         }
@@ -264,24 +271,24 @@ void loop() {
         lcd_write_line(0, line);
         
         if (current_dht.ok) {
-            String t_str = String(current_dht.temp, 1);
-            sprintf(line, "Temp: %s\xDF\x43", t_str.c_str());
+            int t_i = (int)current_dht.temp;
+            int t_d = (int)(abs(current_dht.temp - t_i) * 10);
+            sprintf(line, "Temp: %d.%d\xDF\x43", t_i, t_d);
         } else {
             sprintf(line, "Temp: ---.-\xDF\x43");
         }
         lcd_write_line(1, line);
 
         if (current_dht.ok) {
-            String h_str = String(current_dht.humd, 1);
-            sprintf(line, "Humd: %s%%", h_str.c_str());
+            int h_i = (int)current_dht.humd;
+            int h_d = (int)(abs(current_dht.humd - h_i) * 10);
+            sprintf(line, "Humd: %d.%d%%", h_i, h_d);
         } else {
             sprintf(line, "Humd: ---.-%%");
         }
         lcd_write_line(2, line);
 
-        // Status line with a small "alive" blinker
-        char blink = (current_time.sec % 2 == 0) ? '*' : ' ';
-        sprintf(line, "RTC:%s %c  DHT:%s", current_time.ok?"OK":"ERR", blink, current_dht.ok?"OK":"ERR");
+        sprintf(line, "RTC: %-4s  DHT: %-4s", current_time.ok?"OK":"ERR", current_dht.ok?"OK":"ERR");
         lcd_write_line(3, line);
     }
     if (now - lastDhtUpdate >= 5000) {
