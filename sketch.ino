@@ -1,10 +1,8 @@
 /**
  * worki Project - STM32 Blue Pill (STM32F103C8)
  * 
- * NOTE: LCD Driver in this version is noted as "Most Stable".
- * Features:
- * - Conservative Bit-Banging I2C (SCL: PB6, SDA: PB7)
- * - Custom 1-Wire DHT22 (PA0)
+ * FIX: LCD Ghosting fixed by proper null-check in lcd_write_line.
+ * FIX: RTC compatibility enhanced using Stop-Start sequence.
  */
 
 #include <Arduino.h>
@@ -43,17 +41,19 @@ void sda_low()  { GPIOB_BRR  = (1 << SDA_PIN); }
 void scl_high() { GPIOB_BSRR = (1 << SCL_PIN); }
 void scl_low()  { GPIOB_BRR  = (1 << SCL_PIN); }
 bool sda_read() { return (GPIOB_IDR & (1 << SDA_PIN)); }
+bool scl_read() { return (GPIOB_IDR & (1 << SCL_PIN)); }
 
 void i2c_init() {
     RCC_APB2ENR |= (1 << 3) | (1 << 2); 
     GPIOB_CRL &= ~(0xFF000000);
     GPIOB_CRL |=  (0x55000000); 
-    // Force Bus Idle
     sda_high(); scl_high(); delay(10);
-    // Bus Recovery: Clock out any hung slave
+    if (!sda_read() || !scl_read()) {
+        Serial.print("I2C BUS STUCK: SDA="); Serial.print(sda_read());
+        Serial.print(" SCL="); Serial.println(scl_read());
+    }
     for(int i=0; i<10; i++) {
         scl_low(); I2C_DELAY(); scl_high(); I2C_DELAY();
-        if (sda_read()) break; 
     }
     sda_low(); I2C_DELAY(); sda_high(); delay(50);
 }
@@ -89,6 +89,7 @@ uint8_t i2c_read(bool ack) {
     sda_high(); I2C_DELAY();
     for (int i = 0; i < 8; i++) {
         scl_high(); I2C_DELAY();
+        I2C_DELAY(); 
         if (sda_read()) data |= (1 << (7 - i));
         scl_low();  I2C_DELAY();
     }
@@ -129,7 +130,7 @@ bool dht_read_data(DhtData* data) {
     data->ok = false; return false;
 }
 
-// --- LCD Driver (Most Stable Version) ---
+// --- LCD Driver ---
 #define PIN_RS (1<<0)
 #define PIN_RW (1<<1)
 #define PIN_EN (1<<2)
@@ -143,16 +144,13 @@ void pcf_write(uint8_t d) {
 }
 
 void lcd_pulse(uint8_t d) {
-    pcf_write(d | PIN_EN);
-    delayMicroseconds(50);
-    pcf_write(d & ~PIN_EN);
-    delayMicroseconds(50);
+    pcf_write(d | PIN_EN); delayMicroseconds(50);
+    pcf_write(d & ~PIN_EN); delayMicroseconds(50);
 }
 
 void lcd_send_4(uint8_t n, uint8_t m) {
     uint8_t d = (n << 4) | m;
-    pcf_write(d);
-    lcd_pulse(d);
+    pcf_write(d); lcd_pulse(d);
 }
 
 void lcd_send(uint8_t v, uint8_t m)   { lcd_send_4(v>>4, m); lcd_send_4(v&0x0F, m); }
@@ -172,8 +170,10 @@ void lcd_write_line(int row, const char* txt) {
     lcd_buf[row][20] = '\0';
     uint8_t pos[] = {0x00, 0x40, 0x14, 0x54};
     lcd_cmd(0x80 | pos[row]);
+    bool reached_end = false;
     for (int i = 0; i < 20; i++) {
-        if (txt[i]) lcd_dat(txt[i]); else lcd_dat(' ');
+        if (!reached_end && txt[i] == '\0') reached_end = true;
+        if (!reached_end) lcd_dat(txt[i]); else lcd_dat(' ');
     }
 }
 
@@ -182,7 +182,9 @@ uint8_t b2d(uint8_t v) { return ((v / 16 * 10) + (v % 16)); }
 void ds1307_init() {
     i2c_start();
     if (i2c_write(0x68 << 1)) {
-        i2c_write(0x00); i2c_start(); i2c_write((0x68 << 1) | 1);
+        i2c_write(0x00); 
+        i2c_stop(); delayMicroseconds(100); i2c_start(); // Stop + Start for compatibility
+        i2c_write((0x68 << 1) | 1);
         uint8_t s = i2c_read(false); i2c_stop();
         if (s & 0x80) {
             i2c_start(); i2c_write(0x68 << 1); i2c_write(0x00); 
@@ -197,7 +199,7 @@ void ds1307_read(RtcTime* t) {
     i2c_start();
     if (!i2c_write(0x68 << 1)) { i2c_stop(); t->ok = false; return; }
     i2c_write(0x00); 
-    i2c_start(); 
+    i2c_stop(); delayMicroseconds(50); i2c_start(); // Stop + Start sequence
     if (!i2c_write((0x68 << 1) | 1)) { i2c_stop(); t->ok = false; return; }
     uint8_t raw[7];
     for(int i=0; i<6; i++) raw[i] = i2c_read(true);
