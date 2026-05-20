@@ -222,6 +222,7 @@ void run_fsm() {
             } else {
                 Serial.println("----/--/-- --:--:-- | - | -");
             }
+            Serial.flush(); // Force synchronous transmission to survive simulator stalls
             fsm_step++;
             break;
         case 2: // LCD Line 0
@@ -259,13 +260,11 @@ void loop() {
     
     if (fsm_step == 0) {
         if (now - last1sTask >= 1000) {
-            last1sTask += 1000;
-            if (now - last1sTask > 1000) last1sTask = now; // Prevent catch-up spiral
+            last1sTask = now; // Guarantee 1s space between tasks, avoiding extreme catch-up bugs
             fsm_step = 1;
             lastFsmStep = now;
         } else if (now - last5sTask >= 5000) {
-            last5sTask += 5000;
-            if (now - last5sTask > 5000) last5sTask = now;
+            last5sTask = now;
             fsm_step = 6;
             lastFsmStep = now;
         }
