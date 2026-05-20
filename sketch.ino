@@ -2,7 +2,7 @@
  * worki Project - STM32 Blue Pill (STM32F103C8)
  * 
  * Features:
- * - Robust Bit-Banging I2C (SCL: PB6, SDA: PB7)
+ * - Conservative Bit-Banging I2C (SCL: PB6, SDA: PB7)
  * - Custom 1-Wire DHT22 (PA0)
  */
 
@@ -31,34 +31,34 @@ unsigned long lastDhtUpdate = 0;
 uint8_t lcd_addr = 0x27;
 char lcd_buf[4][21] = {"", "", "", ""};
 
-// --- I2C Bus Layer (Enhanced Bit-Banging with Timeout) ---
+// --- I2C Bus Layer (Conservative Bit-Banging) ---
 #define SCL_PIN 6
 #define SDA_PIN 7
 
-// Conservative delay for simulation stability
-#define I2C_DELAY() delayMicroseconds(20)
+// Increased delay for maximum stability (Approx 12.5kHz)
+#define I2C_DELAY() delayMicroseconds(40)
 
 void sda_high() { GPIOB_BSRR = (1 << SDA_PIN); }
 void sda_low()  { GPIOB_BRR  = (1 << SDA_PIN); }
 void scl_high() { GPIOB_BSRR = (1 << SCL_PIN); }
 void scl_low()  { GPIOB_BRR  = (1 << SCL_PIN); }
 bool sda_read() { return (GPIOB_IDR & (1 << SDA_PIN)); }
-bool scl_read() { return (GPIOB_IDR & (1 << SCL_PIN)); }
 
 void i2c_init() {
     RCC_APB2ENR |= (1 << 3) | (1 << 2); 
     GPIOB_CRL &= ~(0xFF000000);
     GPIOB_CRL |=  (0x55000000); 
     sda_high(); scl_high();
-    // Reset Bus: Clock out any hung slave
-    for(int i=0; i<9; i++) {
+    // Bus Recovery: Clock out any hung slave
+    for(int i=0; i<10; i++) {
         scl_low(); I2C_DELAY(); scl_high(); I2C_DELAY();
     }
-    delay(50);
+    delay(100);
 }
 
 void i2c_start() {
-    sda_high(); scl_high(); I2C_DELAY();
+    sda_high(); I2C_DELAY();
+    scl_high(); I2C_DELAY();
     sda_low();  I2C_DELAY();
     scl_low();  I2C_DELAY();
 }
@@ -88,7 +88,6 @@ uint8_t i2c_read(bool ack) {
     sda_high(); I2C_DELAY();
     for (int i = 0; i < 8; i++) {
         scl_high(); I2C_DELAY();
-        I2C_DELAY(); 
         if (sda_read()) data |= (1 << (7 - i));
         scl_low();  I2C_DELAY();
     }
@@ -129,7 +128,7 @@ bool dht_read_data(DhtData* data) {
     data->ok = false; return false;
 }
 
-// --- LCD Driver (Optimized) ---
+// --- LCD Driver (Rollback to Safe Version) ---
 #define PIN_RS (1<<0)
 #define PIN_RW (1<<1)
 #define PIN_EN (1<<2)
@@ -139,17 +138,20 @@ void pcf_write(uint8_t d) {
     i2c_start(); 
     if (i2c_write(lcd_addr << 1)) i2c_write(d | PIN_BL); 
     i2c_stop(); 
+    delayMicroseconds(100); 
+}
+
+void lcd_pulse(uint8_t d) {
+    pcf_write(d | PIN_EN);
+    delayMicroseconds(50);
+    pcf_write(d & ~PIN_EN);
+    delayMicroseconds(50);
 }
 
 void lcd_send_4(uint8_t n, uint8_t m) {
-    uint8_t d = (n << 4) | m | PIN_BL;
-    i2c_start();
-    if (i2c_write(lcd_addr << 1)) {
-        i2c_write(d);
-        i2c_write(d | PIN_EN);
-        i2c_write(d);
-    }
-    i2c_stop();
+    uint8_t d = (n << 4) | m;
+    pcf_write(d);
+    lcd_pulse(d);
 }
 
 void lcd_send(uint8_t v, uint8_t m)   { lcd_send_4(v>>4, m); lcd_send_4(v&0x0F, m); }
@@ -157,10 +159,10 @@ void lcd_cmd(uint8_t c) { lcd_send(c, 0); delayMicroseconds(100); }
 void lcd_dat(uint8_t d) { lcd_send(d, PIN_RS); }
 
 void lcd_init() {
-    delay(100);
-    lcd_send_4(0x03, 0); delay(5); lcd_send_4(0x03, 0); delay(1); lcd_send_4(0x03, 0); delay(1);
-    lcd_send_4(0x02, 0); delay(1);
-    lcd_cmd(0x28); lcd_cmd(0x0C); lcd_cmd(0x06); lcd_cmd(0x01); delay(5);
+    delay(200);
+    lcd_send_4(0x03, 0); delay(10); lcd_send_4(0x03, 0); delay(5); lcd_send_4(0x03, 0); delay(5);
+    lcd_send_4(0x02, 0); delay(5);
+    lcd_cmd(0x28); lcd_cmd(0x0C); lcd_cmd(0x06); lcd_cmd(0x01); delay(10);
 }
 
 void lcd_write_line(int row, const char* txt) {
@@ -181,9 +183,9 @@ void ds1307_init() {
     if (i2c_write(0x68 << 1)) {
         i2c_write(0x00); i2c_start(); i2c_write((0x68 << 1) | 1);
         uint8_t s = i2c_read(false); i2c_stop();
-        if (s & 0x80) {
+        if ((s & 0x80) || (s == 0xFF)) {
             i2c_start(); i2c_write(0x68 << 1); i2c_write(0x00); 
-            i2c_write(0x00); i2c_write(0x40); i2c_write(0x12); 
+            i2c_write(0x00); i2c_write(0x00); i2c_write(0x12); 
             i2c_write(0x01); i2c_write(0x19); i2c_write(0x05); i2c_write(0x26); 
             i2c_stop();
         }
