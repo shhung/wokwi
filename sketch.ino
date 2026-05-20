@@ -168,6 +168,7 @@ void ds1307_read(RtcTime* t) {
 void dht_set_out() { GPIOA_CRL &= ~(0xF); GPIOA_CRL |= 0x3; }
 void dht_set_in()  { GPIOA_CRL &= ~(0xF); GPIOA_CRL |= 0x4; }
 bool dht_read(DhtData* d) {
+    d->ok = false;
     uint8_t b[5] = {0};
     dht_set_out(); GPIOA_ODR &= ~1; delay(20); GPIOA_ODR |= 1; delayMicroseconds(40); dht_set_in();
     
@@ -195,7 +196,7 @@ bool dht_read(DhtData* d) {
         d->temp10 = temp;
         d->ok = true; return true;
     }
-    d->ok = false; return false;
+    return false;
 }
 
 void setup() {
