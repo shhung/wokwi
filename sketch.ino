@@ -2,7 +2,7 @@
  * worki Project - STM32 Blue Pill (STM32F103C8)
  * 
  * VERSION: STABLE_FSM_V2
- * FIX: Interspaced FSM, Conservative Timings, and Buffer Safety.
+ * FIX: Interspaced FSM, Hardware I2C, and RTC Initialization.
  */
 
 #include <Arduino.h>
@@ -43,55 +43,46 @@ int fsm_step = 0;
 
 // --- I2C Bus Layer (Hardware Controller) ---
 bool i2c_wait_flag(uint32_t reg, uint32_t flag, bool set) {
-    uint32_t timeout = 10000;
+    uint32_t timeout = 20000;
     if (set) while (!(*((volatile uint32_t *)reg) & flag)) { if (--timeout == 0) return false; }
     else while (*((volatile uint32_t *)reg) & flag) { if (--timeout == 0) return false; }
     return true;
 }
 
 void i2c_init() {
-    RCC_APB2ENR |= (1 << 3); // Enable GPIOB Clock
-    RCC_APB1ENR |= (1 << 21); // Enable I2C1 Clock
-    
-    // Configure PB6(SCL), PB7(SDA) as Alternate Function Open-Drain, 50MHz
+    RCC_APB2ENR |= (1 << 3); 
+    RCC_APB1ENR |= (1 << 21);
     GPIOB_CRL &= ~(0xFF000000);
-    GPIOB_CRL |= (0xEE000000); 
-
-    I2C1_CR1 |= (1 << 15); // Software Reset I2C
-    I2C1_CR1 &= ~(1 << 15);
-    
-    I2C1_CR2 = 8; // Set FREQ to 8MHz
-    I2C1_CCR = 40; // 100kHz
-    I2C1_TRISE = 9; 
-    I2C1_CR1 |= (1 << 0); // Enable I2C Peripheral
+    GPIOB_CRL |= (0xEE000000); // PB6, PB7 AF-OD
+    I2C1_CR1 |= (1 << 15); I2C1_CR1 &= ~(1 << 15);
+    I2C1_CR2 = 8; I2C1_CCR = 40; I2C1_TRISE = 9;
+    I2C1_CR1 |= (1 << 0);
 }
 
 bool i2c_start() {
-    I2C1_CR1 |= (1 << 8); // Generate START
-    return i2c_wait_flag(I2C1_BASE + 0x14, (1 << 0), true); // Wait for SB
+    I2C1_CR1 |= (1 << 8);
+    return i2c_wait_flag(I2C1_BASE + 0x14, (1 << 0), true);
 }
 
-void i2c_stop() {
-    I2C1_CR1 |= (1 << 9); // Generate STOP
+void i2c_stop() { I2C1_CR1 |= (1 << 9); }
+
+bool i2c_send_addr(uint8_t addr) {
+    I2C1_DR = addr;
+    if (!i2c_wait_flag(I2C1_BASE + 0x14, (1 << 1), true)) return false;
+    (void)I2C1_SR1; (void)I2C1_SR2;
+    return true;
 }
 
 bool i2c_write(uint8_t data) {
     I2C1_DR = data;
-    if (!i2c_wait_flag(I2C1_BASE + 0x14, (1 << 7) | (1 << 1), true)) return false; 
-    if (I2C1_SR1 & (1 << 1)) { 
-        (void)I2C1_SR1; (void)I2C1_SR2; 
-    }
-    if (I2C1_SR1 & (1 << 10)) { 
-        I2C1_SR1 &= ~(1 << 10);
-        i2c_stop();
-        return false;
-    }
+    if (!i2c_wait_flag(I2C1_BASE + 0x14, (1 << 7), true)) return false;
+    if (I2C1_SR1 & (1 << 10)) { I2C1_SR1 &= ~(1 << 10); return false; }
     return true;
 }
 
 uint8_t i2c_read(bool ack) {
     if (ack) I2C1_CR1 |= (1 << 10); else I2C1_CR1 &= ~(1 << 10);
-    if (!i2c_wait_flag(I2C1_BASE + 0x14, (1 << 6), true)) return 0; 
+    if (!i2c_wait_flag(I2C1_BASE + 0x14, (1 << 6), true)) return 0;
     return (uint8_t)I2C1_DR;
 }
 
@@ -102,7 +93,7 @@ uint8_t i2c_read(bool ack) {
 
 void pcf_write(uint8_t d) { 
     if (i2c_start()) {
-        if (i2c_write(lcd_addr << 1)) i2c_write(d | PIN_BL); 
+        if (i2c_send_addr(lcd_addr << 1)) i2c_write(d | PIN_BL); 
         i2c_stop(); 
     }
     delayMicroseconds(50);
@@ -143,14 +134,17 @@ void lcd_write_line(int row, const char* txt) {
 
 // --- RTC Driver ---
 uint8_t b2d(uint8_t v) { return ((v / 16 * 10) + (v % 16)); }
+uint8_t d2b(uint8_t v) { return ((v / 10 * 16) + (v % 10)); }
+
 void ds1307_read(RtcTime* t) {
     t->ok = false;
     if (!i2c_start()) { i2c_stop(); return; }
-    if (!i2c_write(0x68 << 1)) { i2c_stop(); return; }
+    if (!i2c_send_addr(0x68 << 1)) { i2c_stop(); return; }
     if (!i2c_write(0x00)) { i2c_stop(); return; }
-    
-    if (!i2c_start()) { i2c_stop(); return; } 
-    if (!i2c_write((0x68 << 1) | 1)) { i2c_stop(); return; }
+    i2c_stop(); delayMicroseconds(100);
+
+    if (!i2c_start()) { i2c_stop(); return; }
+    if (!i2c_send_addr((0x68 << 1) | 1)) { i2c_stop(); return; }
     
     uint8_t r[7];
     for (int i = 0; i < 6; i++) r[i] = i2c_read(true);
@@ -162,6 +156,22 @@ void ds1307_read(RtcTime* t) {
     t->ok = (t->month > 0 && t->month <= 12 && t->day > 0 && t->day <= 31);
 }
 
+void ds1307_init() {
+    RtcTime t;
+    ds1307_read(&t);
+    if (!t.ok) { // CH bit set or invalid date detected
+        if (i2c_start()) {
+            if (i2c_send_addr(0x68 << 1)) {
+                i2c_write(0x00); i2c_write(0x00); // Start clock
+                i2c_write(0x00); i2c_write(0x12); // Min, Hour
+                i2c_write(0x01); i2c_write(0x21); // Day, Month
+                i2c_write(0x26); // Year 2026
+                i2c_stop();
+            }
+        }
+    }
+}
+
 // --- DHT Driver ---
 void dht_set_out() { GPIOA_CRL &= ~(0xF); GPIOA_CRL |= 0x3; }
 void dht_set_in()  { GPIOA_CRL &= ~(0xF); GPIOA_CRL |= 0x4; }
@@ -169,14 +179,12 @@ bool dht_read(DhtData* d) {
     d->ok = false;
     uint8_t b[5] = {0};
     dht_set_out(); GPIOA_ODR &= ~1; delay(20); GPIOA_ODR |= 1; delayMicroseconds(40); dht_set_in();
-    
     unsigned long start = micros();
     while ((GPIOA_IDR & 1)) if (micros() - start > 100) return false;
     start = micros();
     while (!(GPIOA_IDR & 1)) if (micros() - start > 100) return false;
     start = micros();
     while ((GPIOA_IDR & 1)) if (micros() - start > 100) return false;
-
     for (int i = 0; i < 40; i++) {
         start = micros();
         while (!(GPIOA_IDR & 1)) if (micros() - start > 100) return false;
@@ -200,6 +208,7 @@ bool dht_read(DhtData* d) {
 void setup() {
     Serial.begin(115200); delay(1000);
     i2c_init();
+    ds1307_init();
     lcd_init();
     last1sTask = millis();
     last5sTask = millis();
@@ -217,7 +226,6 @@ void run_fsm() {
                 sprintf(fsm_buf, "----/--/-- --:--:-- | ");
             }
             Serial.print(fsm_buf);
-
             if (current_dht.ok) {
                 sprintf(fsm_buf, "%d.%d\xC2\xB0\x43 | %d.%d%%", current_dht.temp10 / 10, abs(current_dht.temp10 % 10), current_dht.humd10 / 10, abs(current_dht.humd10 % 10));
             } else {
@@ -258,7 +266,6 @@ void run_fsm() {
 
 void loop() {
     unsigned long now = millis();
-    
     if (fsm_step == 0) {
         if (now - last1sTask >= 1000) {
             last1sTask = now; 
