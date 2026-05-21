@@ -30,78 +30,69 @@ uint8_t lcd_addr = 0x27;
 char lcd_buf[4][21] = {"", "", "", ""};
 int fsm_step = 0;
 
-// --- I2C Bus Layer (Optimized 10us) ---
-#define SCL_PIN 6
-#define SDA_PIN 7
-#define I2C_DELAY() delayMicroseconds(10)
+// --- Hardware I2C1 Register Definitions ---
+#define I2C1_BASE      (0x40005400)
+#define I2C1_CR1       (*((volatile uint32_t *)(I2C1_BASE + 0x00)))
+#define I2C1_CR2       (*((volatile uint32_t *)(I2C1_BASE + 0x04)))
+#define I2C1_DR        (*((volatile uint32_t *)(I2C1_BASE + 0x10)))
+#define I2C1_SR1       (*((volatile uint32_t *)(I2C1_BASE + 0x14)))
+#define I2C1_SR2       (*((volatile uint32_t *)(I2C1_BASE + 0x18)))
+#define I2C1_CCR       (*((volatile uint32_t *)(I2C1_BASE + 0x1C)))
+#define I2C1_TRISE     (*((volatile uint32_t *)(I2C1_BASE + 0x20)))
+#define RCC_APB1ENR    (*((volatile uint32_t *)0x4002101C))
 
-void sda_high() { 
-    GPIOB_CRL &= ~(0xF0000000); GPIOB_CRL |= (0x80000000); 
-    GPIOB_ODR |= (1 << SDA_PIN); 
-}
-void sda_low() { 
-    GPIOB_CRL &= ~(0xF0000000); GPIOB_CRL |= (0x30000000); 
-    GPIOB_ODR &= ~(1 << SDA_PIN); 
-}
-void scl_high() { 
-    GPIOB_CRL &= ~(0x0F000000); GPIOB_CRL |= (0x08000000); 
-    GPIOB_ODR |= (1 << SCL_PIN); 
-}
-void scl_low() { 
-    GPIOB_CRL &= ~(0x0F000000); GPIOB_CRL |= (0x03000000); 
-    GPIOB_ODR &= ~(1 << SCL_PIN); 
-}
-bool sda_read() { return (GPIOB_IDR & (1 << SDA_PIN)); }
-
-void i2c_recover() {
-    sda_high();
-    for (int i = 0; i < 10; i++) {
-        scl_low(); I2C_DELAY(); scl_high(); I2C_DELAY();
-        if (sda_read()) break;
-    }
-    sda_low(); I2C_DELAY(); scl_high(); I2C_DELAY(); sda_high(); I2C_DELAY();
+// --- I2C Bus Layer (Hardware Controller) ---
+bool i2c_wait_flag(uint32_t reg, uint32_t flag, bool set) {
+    uint32_t timeout = 10000;
+    if (set) while (!(*((volatile uint32_t *)reg) & flag)) { if (--timeout == 0) return false; }
+    else while (*((volatile uint32_t *)reg) & flag) { if (--timeout == 0) return false; }
+    return true;
 }
 
 void i2c_init() {
-    RCC_APB2ENR |= (1 << 3) | (1 << 2); 
-    i2c_recover();
+    RCC_APB2ENR |= (1 << 3); // Enable GPIOB Clock
+    RCC_APB1ENR |= (1 << 21); // Enable I2C1 Clock
+    
+    // Configure PB6(SCL), PB7(SDA) as Alternate Function Open-Drain, 50MHz
+    GPIOB_CRL &= ~(0xFF000000);
+    GPIOB_CRL |= (0xEE000000); 
+
+    I2C1_CR1 |= (1 << 15); // Software Reset I2C
+    I2C1_CR1 &= ~(1 << 15);
+    
+    I2C1_CR2 = 8; // Set FREQ to 8MHz
+    I2C1_CCR = 40; // 100kHz
+    I2C1_TRISE = 9; 
+    I2C1_CR1 |= (1 << 0); // Enable I2C Peripheral
 }
 
-void i2c_start() {
-    sda_high(); scl_high(); I2C_DELAY();
-    sda_low(); I2C_DELAY();
-    scl_low(); I2C_DELAY();
+bool i2c_start() {
+    I2C1_CR1 |= (1 << 8); // Generate START
+    return i2c_wait_flag(I2C1_BASE + 0x14, (1 << 0), true); // Wait for SB
 }
 
 void i2c_stop() {
-    sda_low(); I2C_DELAY();
-    scl_high(); I2C_DELAY();
-    sda_high(); I2C_DELAY();
+    I2C1_CR1 |= (1 << 9); // Generate STOP
 }
 
 bool i2c_write(uint8_t data) {
-    for (int i = 0; i < 8; i++) {
-        if (data & 0x80) sda_high(); else sda_low();
-        data <<= 1; I2C_DELAY(); scl_high(); I2C_DELAY(); scl_low(); I2C_DELAY();
+    I2C1_DR = data;
+    if (!i2c_wait_flag(I2C1_BASE + 0x14, (1 << 7) | (1 << 1), true)) return false; 
+    if (I2C1_SR1 & (1 << 1)) { 
+        (void)I2C1_SR1; (void)I2C1_SR2; 
     }
-    sda_high(); I2C_DELAY(); scl_high(); I2C_DELAY();
-    bool ack = !sda_read();
-    scl_low(); I2C_DELAY();
-    return ack;
+    if (I2C1_SR1 & (1 << 10)) { 
+        I2C1_SR1 &= ~(1 << 10);
+        i2c_stop();
+        return false;
+    }
+    return true;
 }
 
 uint8_t i2c_read(bool ack) {
-    uint8_t data = 0;
-    sda_high(); I2C_DELAY();
-    for (int i = 0; i < 8; i++) {
-        scl_high(); I2C_DELAY();
-        if (sda_read()) data |= (1 << (7 - i));
-        scl_low(); I2C_DELAY();
-    }
-    if (ack) sda_low(); else sda_high();
-    I2C_DELAY(); scl_high(); I2C_DELAY(); scl_low(); I2C_DELAY();
-    sda_high(); I2C_DELAY();
-    return data;
+    if (ack) I2C1_CR1 |= (1 << 10); else I2C1_CR1 &= ~(1 << 10);
+    if (!i2c_wait_flag(I2C1_BASE + 0x14, (1 << 6), true)) return 0; 
+    return (uint8_t)I2C1_DR;
 }
 
 // --- LCD Driver ---
@@ -110,14 +101,16 @@ uint8_t i2c_read(bool ack) {
 #define PIN_BL (1<<3)
 
 void pcf_write(uint8_t d) { 
-    i2c_start(); 
-    if (i2c_write(lcd_addr << 1)) i2c_write(d | PIN_BL); 
-    i2c_stop(); 
+    if (i2c_start()) {
+        if (i2c_write(lcd_addr << 1)) i2c_write(d | PIN_BL); 
+        i2c_stop(); 
+    }
+    delayMicroseconds(50);
 }
 
 void lcd_pulse(uint8_t d) {
-    pcf_write(d | PIN_EN); delayMicroseconds(50);
-    pcf_write(d & ~PIN_EN); delayMicroseconds(50);
+    pcf_write(d | PIN_EN); delayMicroseconds(150);
+    pcf_write(d & ~PIN_EN); delayMicroseconds(150);
 }
 
 void lcd_send_4(uint8_t n, uint8_t m) {
@@ -126,14 +119,14 @@ void lcd_send_4(uint8_t n, uint8_t m) {
 }
 
 void lcd_send(uint8_t v, uint8_t m) { lcd_send_4(v >> 4, m); lcd_send_4(v & 0x0F, m); }
-void lcd_cmd(uint8_t c) { lcd_send(c, 0); delayMicroseconds(100); }
+void lcd_cmd(uint8_t c) { lcd_send(c, 0); delayMicroseconds(200); }
 void lcd_dat(uint8_t d) { lcd_send(d, PIN_RS); }
 
 void lcd_init() {
     delay(500);
     lcd_send_4(0x03, 0); delay(10); lcd_send_4(0x03, 0); delay(5); lcd_send_4(0x03, 0); delay(5);
     lcd_send_4(0x02, 0); delay(5);
-    lcd_cmd(0x28); lcd_cmd(0x0C); lcd_cmd(0x06); lcd_cmd(0x01); delay(5);
+    lcd_cmd(0x28); lcd_cmd(0x0C); lcd_cmd(0x06); lcd_cmd(0x01); delay(20);
 }
 
 void lcd_write_line(int row, const char* txt) {
@@ -151,13 +144,19 @@ void lcd_write_line(int row, const char* txt) {
 // --- RTC Driver ---
 uint8_t b2d(uint8_t v) { return ((v / 16 * 10) + (v % 16)); }
 void ds1307_read(RtcTime* t) {
-    i2c_start();
-    if (!i2c_write(0x68 << 1)) { i2c_stop(); t->ok = false; return; }
-    i2c_write(0x00); i2c_stop(); delayMicroseconds(20); i2c_start();
-    if (!i2c_write((0x68 << 1) | 1)) { i2c_stop(); t->ok = false; return; }
+    t->ok = false;
+    if (!i2c_start()) { i2c_stop(); return; }
+    if (!i2c_write(0x68 << 1)) { i2c_stop(); return; }
+    if (!i2c_write(0x00)) { i2c_stop(); return; }
+    
+    if (!i2c_start()) { i2c_stop(); return; } 
+    if (!i2c_write((0x68 << 1) | 1)) { i2c_stop(); return; }
+    
     uint8_t r[7];
     for (int i = 0; i < 6; i++) r[i] = i2c_read(true);
-    r[6] = i2c_read(false); i2c_stop();
+    r[6] = i2c_read(false);
+    i2c_stop();
+    
     t->sec = b2d(r[0] & 0x7F); t->min = b2d(r[1]); t->hour = b2d(r[2] & 0x3F);
     t->day = b2d(r[4]); t->month = b2d(r[5]); t->year = b2d(r[6]);
     t->ok = (t->month > 0 && t->month <= 12 && t->day > 0 && t->day <= 31);
@@ -213,18 +212,18 @@ void run_fsm() {
         case 1: // Task: Read RTC & Serial Log
             ds1307_read(&current_time);
             if (current_time.ok) {
-                sprintf(fsm_buf, "[%02d:%02d:%02d] ", current_time.hour, current_time.min, current_time.sec);
-                Serial.print(fsm_buf);
-                if (current_dht.ok) {
-                    sprintf(fsm_buf, "Temp: %d.%d C | Humd: %d.%d %%", current_dht.temp10 / 10, abs(current_dht.temp10 % 10), current_dht.humd10 / 10, abs(current_dht.humd10 % 10));
-                    Serial.println(fsm_buf);
-                } else {
-                    Serial.println("DHT Waiting...");
-                }
+                sprintf(fsm_buf, "%04d/%02d/%02d %02d:%02d:%02d | ", 2000 + current_time.year, current_time.month, current_time.day, current_time.hour, current_time.min, current_time.sec);
             } else {
-                Serial.println("[RTC ERROR] Check connection");
+                sprintf(fsm_buf, "----/--/-- --:--:-- | ");
             }
-            Serial.flush();
+            Serial.print(fsm_buf);
+
+            if (current_dht.ok) {
+                sprintf(fsm_buf, "%d.%d\xC2\xB0\x43 | %d.%d%%", current_dht.temp10 / 10, abs(current_dht.temp10 % 10), current_dht.humd10 / 10, abs(current_dht.humd10 % 10));
+            } else {
+                sprintf(fsm_buf, "- | -");
+            }
+            Serial.println(fsm_buf);
             fsm_step++;
             break;
         case 2: // LCD Line 0
@@ -262,19 +261,16 @@ void loop() {
     
     if (fsm_step == 0) {
         if (now - last1sTask >= 1000) {
-            last1sTask += 1000; // Correct drift
+            last1sTask = now; 
             fsm_step = 1;
-            run_fsm(); // Immediate execution of first step
-            lastFsmStep = millis();
+            lastFsmStep = now;
         } else if (now - last5sTask >= 5000) {
-            last5sTask += 5000; // Correct drift
+            last5sTask = now;
             fsm_step = 6;
-            run_fsm(); // Immediate execution of first step
-            lastFsmStep = millis();
+            lastFsmStep = now;
         }
     } else {
-        // Execute one state every 50ms to spread the I2C load faster
-        if (now - lastFsmStep >= 50) {
+        if (now - lastFsmStep >= 100) {
             lastFsmStep = now;
             run_fsm();
         }

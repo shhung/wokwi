@@ -631,3 +631,26 @@
 - 優化了 `ds1307_read` 與 `lcd_write_line` 的執行效率。
 - 完成優化後，系統能精確地每秒產出一次 Serial 紀錄，且 LCD 刷新更加流暢。
 
+---
+
+## 2026-05-21: 遷移至硬體 I2C 控制器與編譯修復
+
+### 使用者需求 (Prompt)
+- 將 GPIO 實作的 I2C driver 改成使用 I2C controller 的方式實作。
+- 修復因重構導致的編譯錯誤（PIN_BL, b2d, lcd_init, lcd_write_line 未宣告）。
+
+### 關鍵決策
+- **硬體 I2C1 整合**：
+    - 直接操作 STM32F103 的硬體暫存器（CR1, CR2, SR1, SR2, DR, CCR, TRISE）。
+    - 配置 PB6/PB7 為 **Alternate Function Open-Drain**。
+    - 實作具備 10,000 次計數逾時保護的 `i2c_wait_flag`，解決硬體狀態機在模擬器中可能卡死的問題。
+- **編譯錯誤修復 (Structural Fix)**：
+    - 診斷出 `replace` 工具損毀了 LCD 驅動函式與輔助巨集。
+    - 重新整理 `sketch.ino` 的宣告順序，補回遺失的 `PIN_BL` 巨集、`b2d` 函式以及完整的 LCD 驅動邏輯 (`lcd_init`, `lcd_write_line`)。
+- **時序維持**：保持保守的 100kHz (CCR=40) 硬體時鐘頻率，並維持 FSM 的分段執行邏輯以確保穩定性。
+
+### 技術細節
+- 解決了 ADDR Flag 清除邏輯（需依序讀取 SR1 與 SR2）。
+- 確保了硬體 Stop 條件能正確釋放總線。
+- 恢復了 `readme.md` 要求的精確輸出格式。
+
