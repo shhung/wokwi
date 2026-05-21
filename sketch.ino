@@ -56,7 +56,7 @@ void i2c_init() {
     GPIOB_CRL |= (0xEE000000); // PB6, PB7 AF-OD
     I2C1_CR1 |= (1 << 15); I2C1_CR1 &= ~(1 << 15);
     I2C1_CR2 = 8; I2C1_CCR = 40; I2C1_TRISE = 9;
-    I2C1_CR1 |= (1 << 0);
+    I2C1_CR1 |= (1 << 10) | (1 << 0); // Enable ACK and I2C Peripheral
 }
 
 bool i2c_start() {
@@ -80,10 +80,13 @@ bool i2c_write(uint8_t data) {
     return true;
 }
 
-uint8_t i2c_read(bool ack) {
-    if (ack) I2C1_CR1 |= (1 << 10); else I2C1_CR1 &= ~(1 << 10);
+uint8_t i2c_read(bool ack, bool stop) {
+    if (!ack) I2C1_CR1 &= ~(1 << 10); // Clear ACK before receiving last byte
     if (!i2c_wait_flag(I2C1_BASE + 0x14, (1 << 6), true)) return 0;
-    return (uint8_t)I2C1_DR;
+    if (stop) i2c_stop(); // Generate STOP before reading DR
+    uint8_t data = (uint8_t)I2C1_DR;
+    if (!ack) I2C1_CR1 |= (1 << 10); // Restore ACK
+    return data;
 }
 
 // --- LCD Driver ---
@@ -147,9 +150,8 @@ void ds1307_read(RtcTime* t) {
     if (!i2c_send_addr((0x68 << 1) | 1)) { i2c_stop(); return; }
     
     uint8_t r[7];
-    for (int i = 0; i < 6; i++) r[i] = i2c_read(true);
-    r[6] = i2c_read(false);
-    i2c_stop();
+    for (int i = 0; i < 6; i++) r[i] = i2c_read(true, false);
+    r[6] = i2c_read(false, true); // NACK and STOP
     
     t->sec = b2d(r[0] & 0x7F); t->min = b2d(r[1]); t->hour = b2d(r[2] & 0x3F);
     t->day = b2d(r[4]); t->month = b2d(r[5]); t->year = b2d(r[6]);
