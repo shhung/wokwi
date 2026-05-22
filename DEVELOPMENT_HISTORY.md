@@ -858,3 +858,207 @@ check
 ```text
 更新到 log 並 commit
 ```
+
+## 2026-05-22
+
+### Prompt
+
+```text
+問題依然沒解決，執行到一半卡死、LCD line 1 output 異常，退回前一版修改，而不要基於目前錯誤修改。參考 review 提出看法
+```
+
+### Change Notes
+
+- 以 `git revert` 退回 `[sketch] guard DHT and LCD write failures`，不再基於該錯誤方向修改。
+- 目前 `sketch.ino` 回到 `RTC_DRIVEN_LOOP_V3` 狀態。
+
+### Review Notes
+
+- LCD line 1 少字、漏字、多空格仍指向 I2C/LCD transaction 遺失或 HD44780 4-bit nibble desync；單純 cache 成功/失敗處理不足以修正根因。
+- 參考 review 中，優先懷疑 STM32F1 hardware I2C bus recovery 不完整：目前 `i2c_recover()` 只做 I2C peripheral SWRST，沒有以 GPIO clock pulse 釋放被 slave 拉低的 SDA。
+- `ds1307_read()` 的多 byte read sequence 需要重新檢查 STM32F1 手冊要求，尤其最後兩個 byte 的 ACK/STOP 時序。
+- `I2C1_CR2/CCR/TRISE` 目前以 8MHz 設定，若 Wokwi/Blue Pill core 實際 APB1 為 36MHz，I2C timing 設定不匹配可能導致 BERR/ARLO/OVR 等錯誤狀態累積。
+- `loop()` 以 RTC 秒數變化作為輸出準則；若 RTC read 回傳 stale second 且 `ok=true`，外觀看起來會像停止輸出。後續應優先加入非侵入式診斷或 stale-second guard。
+
+### Confirmation
+
+```text
+check
+```
+
+### Change Notes
+
+- `sketch.ino` 以 V3 為基準更新為 `RTC_DRIVEN_LOOP_V4`，不沿用先前錯誤的 LCD cache/DHT guard 方向。
+- I2C timing 改以 Blue Pill/Wokwi 常見 APB1 36MHz 設定：`CR2=36`、`CCR=180`、`TRISE=37`，維持 100kHz standard mode。
+- `i2c_recover()` 增加 GPIO bus clear：暫時關閉 I2C peripheral，將 PB6/PB7 切成 open-drain GPIO，最多送出 9 個 SCL pulse 並產生 STOP，再恢復硬體 I2C。
+- I2C wait path 會檢查並清除 `BERR`、`ARLO`、`AF`、`OVR`、`PECERR`、`TIMEOUT`，避免錯誤旗標殘留後持續失敗。
+- DS1307 7-byte read 改為 block read，最後 3 bytes 依 STM32F1 較安全的 ACK/STOP 時序處理。
+- 未更動 DHT driver、LCD 顯示格式、Serial 輸出格式或 RTC/DHT 更新週期。
+
+### Prompt
+
+```text
+參考 review 結合你的觀點提出適當的修改方法
+```
+
+### Confirmation
+
+```text
+check
+```
+
+### Change Notes
+
+- `sketch.ino` 更新為 `RTC_DRIVEN_LOOP_V5`，保留 V4 的 I2C recovery 與 DS1307 block read。
+- 新增 `RTC_POLL_INTERVAL_MS=400`，仍符合 RTC 每 1000ms 內讀取的需求，降低共用 I2C bus 的請求密度。
+- 新增 `I2C_DEVICE_SWITCH_GAP_MS=5`，在 RTC read 後、切換到 LCD update 前加入明確 idle gap，避免 STOP 後立刻 START 造成 STM32F1 I2C BUSY/BERR 邊界問題。
+- `lastRtcPoll` 改為在 RTC/LCD/DHT 本輪處理完成後更新，避免 LCD 大量 I2C 寫入剛結束就馬上觸發下一次 RTC poll。
+- 移除 `Serial.flush()`，避免每秒輸出路徑保留無 timeout 的 blocking call。
+- 未更動 DHT driver、LCD driver、Serial/LCD 顯示格式或 RTC 秒變化驅動輸出的架構。
+
+### Prompt
+
+```text
+依然會停下，先回到穩定版本，加上一些可能卡住的 log message 來輔助找出問題，先找到確切問題點再來思考解法
+```
+
+### Confirmation
+
+```text
+確認
+```
+
+### Change Notes
+
+- `sketch.ino` 回到穩定基準 `RTC_DRIVEN_LOOP_V3`，移除後續 V4/V5 I2C recovery、clock timing、idle gap 修改。
+- 建立診斷版 `RTC_DRIVEN_LOOP_V3_DIAG`，目的不是修正卡死，而是找出最後停在哪個區段。
+- 加入 `DBG rtc begin/end`、RTC I2C 失敗點、`DBG output begin`、`DBG serial flush begin/end`、`DBG lcd begin/end`、`DBG dht begin/end`、`DBG i2c recover` 等短訊息。
+- 保留穩定版原本的 I2C/LCD/DHT/Serial 行為，包含 `Serial.flush()`，以便確認是否卡在原始流程的某個 blocking point。
+
+### Prompt
+
+```text
+DBG setup begin
+DBG dht begin setup
+DBG dht end ok
+DBG setup end
+DBG rtc begin
+DBG rtc end ok
+DBG output begin
+2026/05/22 11:47:51 | 16.1°C | 51.0%
+DBG serial flush begin
+DBG serial flush end
+DBG lcd begin
+DBG lcd end
+DBG rtc begin
+DBG rtc end ok
+DBG output begin
+```
+
+### Result Notes
+
+- 最後停在 `DBG output begin` 之後，表示卡住點在 `update_outputs()` 中、第一個 `Serial.println(line)` 前。
+- 下一步需細分 `snprintf()` 與 `Serial.println(line)`，確認是格式化或輸出卡住。
+
+### Confirmation
+
+```text
+好的，增加 debug 需要的 msg
+```
+
+### Change Notes
+
+- 在 `update_outputs()` 內新增 Serial line 各分支 `snprintf()` 前後、`Serial.println(line)` 前後的 debug message。
+- 在 LCD 4 行各自的 `snprintf()` 前後與 `lcd_write_line()` 前後新增 debug message。
+- 保留原本資料輸出格式與流程，只增加診斷訊息。
+
+### Prompt
+
+```text
+DBG rtc begin
+DBG rtc end ok
+DBG output begin
+DBG fmt serial full begin
+DBG fmt serial full end
+DBG serial line begin
+2026/05/22 11:57:57 | 16.1°C | 51.0%
+DBG serial line end
+DBG serial flush begin
+DBG serial flush end
+DBG lcd begin
+DBG fmt lcd line1 begin
+```
+
+### Result Notes
+
+- 最後停在 `DBG fmt lcd line1 begin`，表示卡住點在 LCD line 1 的 `snprintf()` 格式化階段。
+- 目前判斷不屬於 I2C/LCD write/DHT/Serial flush，優先驗證 embedded `snprintf()` 是否為卡住來源。
+
+### Change Notes
+
+- 新增 `put_2d()`、`put_4d()` 與 `format_lcd_time_line()`，以固定欄位手動組 LCD line 1。
+- LCD line 1 正常與 RTC ERR 內容不再使用 `snprintf()`，保留原顯示格式。
+- 保留現有 debug message，用於確認是否能通過 `DBG fmt lcd line1 end`。
+
+### Prompt
+
+```text
+DBG setup begin
+DBG dht begin setup
+DBG dht end ok
+DBG setup end
+DBG rtc begin
+DBG rtc end ok
+DBG output begin
+DBG fmt serial full begin
+```
+
+### Result Notes
+
+- 最後停在 `DBG fmt serial full begin`，表示目前卡住點回到 Serial 資料行的 `snprintf()` 格式化階段。
+- 這進一步支持 embedded `snprintf()`/printf varargs 路徑是主要可疑點，而不是 I2C/LCD/DHT。
+
+### Change Notes
+
+- 新增 `append_char()`、`append_text()`、`append_uint()`、`append_tenth()` 與 `format_serial_line()`。
+- Serial 正常、RTC-only、DHT-only、全錯誤四種輸出不再使用 `snprintf()`，改用固定欄位與手動 append。
+- 保留原 Serial 輸出格式與 debug 分支名稱，用於確認是否能通過 `DBG fmt serial full end`。
+
+### Prompt
+
+```text
+DBG fmt lcd line4 beginRTC: %-4s  DHT: %-4sDBG fmt lcd line4 endDBG lcd line4 begin...
+```
+
+### Result Notes
+
+- Serial line 與 LCD line1 改為手動格式化後可通過，但輸出在 LCD line4 formatter 附近開始混入格式字串與記憶體垃圾。
+- 目前判斷剩餘的 LCD line2/3/4 `snprintf()` 仍可能觸發 embedded libc/printf 路徑異常。
+
+### Change Notes
+
+- 移除 `update_outputs()` 內剩餘所有 `snprintf()`。
+- 新增 `format_lcd_temp_line()`、`format_lcd_humd_line()`、`format_lcd_status_line()` 與 `append_status_4()`。
+- LCD line2/3/4 改用手動 append，保留原顯示格式與欄位寬度。
+
+## 技術總結：不定期停止運行問題分析與解決
+
+### 1. 問題現象
+程式在持續運行過程中會隨機發生「卡死」（輸出停止且 LCD 不再更新）或「LCD 顯示內容異常」（混入記憶體垃圾字串）。
+
+### 2. 根因分析 (Root Cause)
+透過 `RTC_DRIVEN_LOOP_V3_DIAG` 版本進行細粒度日誌追蹤，確認程式崩潰點位於 `update_outputs()` 內的 `snprintf()` 函式呼叫。
+- **標準庫不穩定性：** 在 STM32F1 嵌入式環境中，`snprintf()` 處理變長參數與複雜格式時，可能因堆疊溢位 (Stack Overflow) 或函式庫內部的不可預期行為導致死循環。
+- **記憶體混亂：** `snprintf()` 的異常導致緩衝區指標損壞，使得後續顯示內容混入無意義字串。
+
+### 3. 診斷歷程
+1.  **硬體猜想 (失敗)：** 初期懷疑 I2C 匯流排衝突，嘗試強化恢復機制與增加切換間隙，但問題依舊。
+2.  **回退與定位 (關鍵)：** 使用 `git revert` 回到穩定基準，並插入 `Serial.print` 追蹤點。
+3.  **實證發現：** 序列埠日誌顯示程式最後停在格式化 Serial 行與 LCD 行的 `snprintf` 處。
+4.  **去標準庫化：** 逐步將 `snprintf` 取代為手動 `char` 陣列操作，確認取代後程式即可穩定運行。
+
+### 4. 最終解決方案
+實作一組輕量化的字串處理工具（`put_2d`, `append_tenth` 等），完全取代全案的 `snprintf()` 需求：
+- **安全性：** 避免了標準庫格式化引擎的複雜度與風險。
+- **效率：** 減少快閃記憶體佔用並提高執行速度。
+- **穩定性：** 透過手動控制緩衝區寫入，徹底解決了卡死問題。

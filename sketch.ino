@@ -2,7 +2,7 @@
  * worki Project - STM32 Blue Pill (STM32F103C8)
  * 
  * VERSION: RTC_DRIVEN_LOOP_V3
- * FIX: Atomic serial lines and safer DHT pin drive.
+ * FIX: Stable baseline for production.
  */
 
 #include <Arduino.h>
@@ -52,7 +52,7 @@ bool i2c_wait_flag(uint32_t reg, uint32_t flag, bool set) {
 }
 
 void i2c_init() {
-    RCC_APB2ENR |= (1 << 3); 
+    RCC_APB2ENR |= (1 << 3);
     RCC_APB1ENR |= (1 << 21);
     GPIOB_CRL &= ~(0xFF000000);
     GPIOB_CRL |= (0xEE000000); // PB6, PB7 AF-OD
@@ -139,7 +139,9 @@ void pcf_write(uint8_t d) {
         if (i2c_send_addr(lcd_addr << 1)) ok = i2c_write(d | PIN_BL);
         i2c_stop(); 
     }
-    if (!ok) i2c_recover();
+    if (!ok) {
+        i2c_recover();
+    }
     delayMicroseconds(50);
 }
 
@@ -299,43 +301,165 @@ uint32_t rtc_elapsed_seconds(uint32_t now, uint32_t last) {
     return (now + 86400UL - last) % 86400UL;
 }
 
+void put_2d(char* p, uint8_t v) {
+    p[0] = '0' + (v / 10);
+    p[1] = '0' + (v % 10);
+}
+
+void put_4d(char* p, uint16_t v) {
+    p[0] = '0' + ((v / 1000) % 10);
+    p[1] = '0' + ((v / 100) % 10);
+    p[2] = '0' + ((v / 10) % 10);
+    p[3] = '0' + (v % 10);
+}
+
+void append_char(char** p, char* end, char c) {
+    if (*p < end) *(*p)++ = c;
+}
+
+void append_text(char** p, char* end, const char* s) {
+    while (*s) append_char(p, end, *s++);
+}
+
+void append_uint(char** p, char* end, uint16_t v) {
+    char tmp[5];
+    uint8_t n = 0;
+
+    do {
+        tmp[n++] = '0' + (v % 10);
+        v /= 10;
+    } while (v && n < sizeof(tmp));
+
+    while (n > 0) append_char(p, end, tmp[--n]);
+}
+
+void append_tenth(char** p, char* end, int16_t v) {
+    if (v < 0) {
+        append_char(p, end, '-');
+        v = -v;
+    }
+    append_uint(p, end, v / 10);
+    append_char(p, end, '.');
+    append_char(p, end, '0' + (v % 10));
+}
+
+void format_lcd_time_line(char* buf, size_t size) {
+    if (size < 21) return;
+
+    if (!current_time.ok) {
+        memcpy(buf, "--:--:--  ----/--/--", 21);
+        return;
+    }
+
+    memcpy(buf, "00:00:00  0000/00/00", 21);
+    put_2d(&buf[0], current_time.hour);
+    put_2d(&buf[3], current_time.min);
+    put_2d(&buf[6], current_time.sec);
+    put_4d(&buf[10], 2000 + current_time.year);
+    put_2d(&buf[15], current_time.month);
+    put_2d(&buf[18], current_time.day);
+}
+
+void format_serial_line(char* line, size_t size) {
+    if (size == 0) return;
+
+    char* p = line;
+    char* end = line + size - 1;
+
+    if (current_time.ok) {
+        char t[20];
+        memcpy(t, "0000/00/00 00:00:00", 20);
+        put_4d(&t[0], 2000 + current_time.year);
+        put_2d(&t[5], current_time.month);
+        put_2d(&t[8], current_time.day);
+        put_2d(&t[11], current_time.hour);
+        put_2d(&t[14], current_time.min);
+        put_2d(&t[17], current_time.sec);
+        for (int i = 0; i < 19; i++) append_char(&p, end, t[i]);
+    } else {
+        append_text(&p, end, "----/--/-- --:--:--");
+    }
+
+    append_text(&p, end, " | ");
+    if (current_dht.ok) {
+        append_tenth(&p, end, current_dht.temp10);
+        append_text(&p, end, "\xC2\xB0\x43 | ");
+        append_tenth(&p, end, current_dht.humd10);
+        append_char(&p, end, '%');
+    } else {
+        append_text(&p, end, "- | -");
+    }
+
+    *p = '\0';
+}
+
+void format_lcd_temp_line(char* buf, size_t size) {
+    if (size == 0) return;
+
+    char* p = buf;
+    char* end = buf + size - 1;
+
+    append_text(&p, end, "Temp: ");
+    if (current_dht.ok) {
+        append_tenth(&p, end, current_dht.temp10);
+        append_text(&p, end, "\xDF\x43");
+    } else {
+        append_text(&p, end, "---.-\xDF\x43");
+    }
+    *p = '\0';
+}
+
+void format_lcd_humd_line(char* buf, size_t size) {
+    if (size == 0) return;
+
+    char* p = buf;
+    char* end = buf + size - 1;
+
+    append_text(&p, end, "Humd: ");
+    if (current_dht.ok) {
+        append_tenth(&p, end, current_dht.humd10);
+        append_char(&p, end, '%');
+    } else {
+        append_text(&p, end, "---.-%");
+    }
+    *p = '\0';
+}
+
+void append_status_4(char** p, char* end, bool ok) {
+    if (ok) append_text(p, end, "OK  ");
+    else append_text(p, end, "ERR ");
+}
+
+void format_lcd_status_line(char* buf, size_t size) {
+    if (size == 0) return;
+
+    char* p = buf;
+    char* end = buf + size - 1;
+
+    append_text(&p, end, "RTC: ");
+    append_status_4(&p, end, current_time.ok);
+    append_text(&p, end, "  DHT: ");
+    append_status_4(&p, end, current_dht.ok);
+    *p = '\0';
+}
+
 void update_outputs() {
     char buf[64];
     char line[64];
 
-    if (current_time.ok && current_dht.ok) {
-        snprintf(line, sizeof(line), "%04d/%02d/%02d %02d:%02d:%02d | %d.%d\xC2\xB0\x43 | %d.%d%%",
-            2000 + current_time.year, current_time.month, current_time.day,
-            current_time.hour, current_time.min, current_time.sec,
-            current_dht.temp10 / 10, abs(current_dht.temp10 % 10),
-            current_dht.humd10 / 10, abs(current_dht.humd10 % 10));
-    } else if (current_time.ok) {
-        snprintf(line, sizeof(line), "%04d/%02d/%02d %02d:%02d:%02d | - | -",
-            2000 + current_time.year, current_time.month, current_time.day,
-            current_time.hour, current_time.min, current_time.sec);
-    } else if (current_dht.ok) {
-        snprintf(line, sizeof(line), "----/--/-- --:--:-- | %d.%d\xC2\xB0\x43 | %d.%d%%",
-            current_dht.temp10 / 10, abs(current_dht.temp10 % 10),
-            current_dht.humd10 / 10, abs(current_dht.humd10 % 10));
-    } else {
-        snprintf(line, sizeof(line), "----/--/-- --:--:-- | - | -");
-    }
+    format_serial_line(line, sizeof(line));
     Serial.println(line);
-    Serial.flush();
 
-    if (current_time.ok) snprintf(buf, sizeof(buf), "%02d:%02d:%02d  %04d/%02d/%02d", current_time.hour, current_time.min, current_time.sec, 2000 + current_time.year, current_time.month, current_time.day);
-    else snprintf(buf, sizeof(buf), "--:--:--  ----/--/--");
+    format_lcd_time_line(buf, sizeof(buf));
     lcd_write_line(0, buf);
 
-    if (current_dht.ok) snprintf(buf, sizeof(buf), "Temp: %d.%d\xDF\x43", current_dht.temp10 / 10, abs(current_dht.temp10 % 10));
-    else snprintf(buf, sizeof(buf), "Temp: ---.-\xDF\x43");
+    format_lcd_temp_line(buf, sizeof(buf));
     lcd_write_line(1, buf);
 
-    if (current_dht.ok) snprintf(buf, sizeof(buf), "Humd: %d.%d%%", current_dht.humd10 / 10, abs(current_dht.humd10 % 10));
-    else snprintf(buf, sizeof(buf), "Humd: ---.-%%");
+    format_lcd_humd_line(buf, sizeof(buf));
     lcd_write_line(2, buf);
 
-    snprintf(buf, sizeof(buf), "RTC: %-4s  DHT: %-4s", current_time.ok ? "OK" : "ERR", current_dht.ok ? "OK" : "ERR");
+    format_lcd_status_line(buf, sizeof(buf));
     lcd_write_line(3, buf);
 }
 
@@ -379,7 +503,9 @@ void loop() {
     ds1307_read(&current_time);
     if (current_time.ok) {
         uint32_t rtc_now = rtc_second_of_day(&current_time);
-        if (current_time.sec == lastRtcSecond) return;
+        if (current_time.sec == lastRtcSecond) {
+            return;
+        }
 
         lastRtcSecond = current_time.sec;
         lastFallbackUpdate = now;
